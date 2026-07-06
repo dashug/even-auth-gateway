@@ -51,8 +51,11 @@ def build_app() -> FastAPI:
     @app.post("/casdoor/webhook")
     async def casdoor_webhook(request: Request):
         body = await request.body()
-        sig = request.headers.get("X-Casdoor-Signature", "")  # header 名以 casdoor-findings.md(0.4.3) 为准
-        result = await wh.handle(body, sig)
+        # Casdoor 无 body 签名,认证靠 webhook 配置的自定义头传共享 token。
+        # header 名由 CASDOOR_WEBHOOK_HEADER 配(默认 X-Webhook-Token),须与 Casdoor 后台 webhook 的 header 名一致。
+        header = os.getenv("CASDOOR_WEBHOOK_HEADER", "X-Webhook-Token")
+        token = request.headers.get(header, "")
+        result = await wh.handle(body, token)
         return Response(status_code=401 if result["status"] == "rejected" else 200)
 
     @app.post("/feishu/card")

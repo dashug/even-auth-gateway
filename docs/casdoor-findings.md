@@ -71,3 +71,14 @@
   2. casdoor_admin 改 read-modify-write（已校准，commit f3d05df）。
   3. casdoor_admin 加 `find_user_by_open_id`（userId 反查）；decision/offboard 先把 open_id 解析成 `<org>/<name>`（校准中）。
   4. 授权准入用 `groups` claim 含 `<org>/approved-operators`（org 限定，非裸组名）。
+
+---
+
+## 6. Webhook 验证机制（Phase prod-4 实测，2026-07-06）
+
+- **Casdoor webhook 不对 body 做 HMAC 签名**。安全模型是:在 webhook 上配置**自定义请求头**（如 `X-Webhook-Token: <shared>`），Casdoor 每次回调携带该头。接收端**比对头值 == 共享密钥**即可，无需 body HMAC。
+  - ⟹ 治理服务 `webhook._verify` 已从"body HMAC + `X-Casdoor-Signature`"（**错误方向，Casdoor 从不发此头**）改为"常量时间比对 `CASDOOR_WEBHOOK_HEADER`(默认 `X-Webhook-Token`) 值 == `CASDOOR_WEBHOOK_SECRET`"，未配密钥 fail-closed。
+- **Webhook body = Casdoor `Record`**：`action`（如 signup/add-user）、`object`（受影响对象的 **JSON 字符串**）、`organization`、`user`（操作者用户名，**非对象**）；勾选 `isUserExtended` 时完整用户对象在 `extendedUser`。
+  - ⟹ `webhook._extract_user` 按 `extendedUser` > `object`(str→解析) > `user`(dict 兜底) 取用户对象。
+- **Webhook 触发按 record 的 organization 匹配**，record.org = **操作者的 org**（admin 操作 → built-in），非目标对象 org。生产真实飞书 signup 走应用 org（如 even-test）。
+- ⚠️ **本地实例的 webhook 投递未触发**（record 正常生成但 Casdoor 未发出，疑似 webhook 缓存/构建差异）——故上述对齐由**官方文档 + 接收端活验**（真实 Record 形状 payload 打 `/casdoor/webhook`：正确 token→200、错/无 token→401、pending 正确建出）确认，**非 Casdoor 自身投递抓包**确认。生产接线时以真实回调再核一次头名/ body 形状。

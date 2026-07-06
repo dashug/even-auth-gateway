@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-import hmac, hashlib, json
+import json
 
 def _app(monkeypatch, tmp_path):
     monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
@@ -8,18 +8,27 @@ def _app(monkeypatch, tmp_path):
     from even_auth_gov.app import build_app
     return build_app()
 
-def test_webhook_route_rejects_bad_sig(monkeypatch, tmp_path):
+def test_webhook_route_rejects_bad_token(monkeypatch, tmp_path):
     app = _app(monkeypatch, tmp_path)
     with TestClient(app) as c:
-        r = c.post("/casdoor/webhook", content=b"{}", headers={"X-Casdoor-Signature": "bad"})
+        r = c.post("/casdoor/webhook", content=b"{}", headers={"X-Webhook-Token": "bad"})
         assert r.status_code == 401
 
-def test_webhook_route_accepts_good_sig(monkeypatch, tmp_path):
+def test_webhook_route_accepts_good_token(monkeypatch, tmp_path):
+    # Casdoor 认证靠自定义头传共享 token(默认 header 名 X-Webhook-Token),非 body 签名
     app = _app(monkeypatch, tmp_path)
-    body = json.dumps({"action": "signup", "user": {"id": "ou_n", "name": "N"}}).encode()
-    sig = hmac.new(b"shh", body, hashlib.sha256).hexdigest()
+    body = json.dumps({"action": "signup", "object": json.dumps({"id": "ou_n", "name": "N"})}).encode()
     with TestClient(app) as c:
-        r = c.post("/casdoor/webhook", content=body, headers={"X-Casdoor-Signature": sig})
+        r = c.post("/casdoor/webhook", content=body, headers={"X-Webhook-Token": "shh"})
+        assert r.status_code == 200
+
+def test_webhook_route_custom_header_name(monkeypatch, tmp_path):
+    # header 名可配:CASDOOR_WEBHOOK_HEADER
+    monkeypatch.setenv("CASDOOR_WEBHOOK_HEADER", "Authorization")
+    app = _app(monkeypatch, tmp_path)
+    body = json.dumps({"action": "signup", "object": json.dumps({"id": "ou_m", "name": "M"})}).encode()
+    with TestClient(app) as c:
+        r = c.post("/casdoor/webhook", content=body, headers={"Authorization": "shh"})
         assert r.status_code == 200
 
 def test_card_callback_routes_to_decision(monkeypatch, tmp_path):
