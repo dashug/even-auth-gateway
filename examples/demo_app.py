@@ -72,7 +72,20 @@ def _decode(id_token: str) -> dict:
 
 @app.get("/")
 async def home():
-    return HTMLResponse(f'<a href="/login">用飞书登录（经 {APP} 接入网关）</a>')
+    return HTMLResponse(f"""
+<!doctype html><meta charset=utf-8>
+<title>Demo App · 接入网关示例</title>
+<div style="min-height:90vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+     font-family:-apple-system,'PingFang SC',sans-serif;background:#f5f6f8">
+  <div style="background:#fff;padding:44px 40px;border-radius:16px;box-shadow:0 8px 30px rgba(0,0,0,.08);
+       text-align:center;max-width:360px">
+    <div style="font-size:20px;font-weight:700;margin-bottom:6px">Demo App</div>
+    <div style="color:#888;font-size:13px;margin-bottom:28px">接入 even-auth-gateway 的最小示例（应用: {APP}）</div>
+    <a href="/login" style="display:block;background:#3370ff;color:#fff;text-decoration:none;
+       padding:13px 0;border-radius:10px;font-size:15px;font-weight:600">⚡ 用飞书登录</a>
+    <div style="color:#aaa;font-size:12px;margin-top:16px">点击 → 跳网关(Casdoor) → 飞书扫码/免登 → 回本应用</div>
+  </div>
+</div>""")
 
 # 跑法:
 #   export CASDOOR_ENDPOINT=http://127.0.0.1:8000 CASDOOR_CLIENT_ID=... CASDOOR_CLIENT_SECRET=... CASDOOR_ORG=even-test
