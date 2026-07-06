@@ -1,0 +1,37 @@
+# 统一飞书登录网关 — Casdoor 地基（Phase 0 spike / 本地验证用）
+# 起：  docker compose -f deploy/casdoor/docker-compose.yml up -d
+# 停：  docker compose -f deploy/casdoor/docker-compose.yml down
+# 清库：docker compose -f deploy/casdoor/docker-compose.yml down -v
+#
+# 生产部署时把 casdoor 挂到 nginx 反代的 auth 子域，并用强密码 + 独立 .env。
+services:
+  casdoor-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: casdoor
+      POSTGRES_PASSWORD: casdoor_local_pw
+      POSTGRES_DB: casdoor
+    volumes:
+      - casdoor_pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"   # 仅本地，避免撞占用
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casdoor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  casdoor:
+    image: casbin/casdoor:latest
+    depends_on:
+      casdoor-db:
+        condition: service_healthy
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      driverName: postgres
+      dataSourceName: "user=casdoor password=casdoor_local_pw host=casdoor-db port=5432 sslmode=disable dbname=casdoor"
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  casdoor_pg:
