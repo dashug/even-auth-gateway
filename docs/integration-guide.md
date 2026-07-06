@@ -13,7 +13,13 @@
 1. **Applications → 新建你的应用**，拿到 `clientId` / `clientSecret`，Redirect URLs 填 `https://<你的应用>/callback`（逐字一致）。
 2. **Groups → 建准入组** `approved-<你的应用短名>`（例：`approved-demo-app`）。
 3.（要角色权限才做）**Roles → 建角色** `<应用短名>-<role>`（例：`demo-app-viewer`），把用户放进去。
-4. **⚠️ 安全必做：裁 id_token 字段**——Casdoor 默认把整个用户对象（含 `password`/`totpSecret`）塞进 id_token，在应用的 token 字段配置里只留 `sub/name/displayName/email/groups/roles`。
+4. **⚠️ 安全必做：裁 id_token 字段**——Casdoor 默认 `tokenFormat=JWT` 会把整个用户对象塞进 id_token（含 `passwordSalt` 等，实测泄露）。**关键：光设 tokenFields 不够，必须同时把 `tokenFormat` 改成 `JWT-Custom`**，白名单才生效。API 做法：
+   ```
+   POST <CASDOOR>/api/update-application?id=admin/<你的应用>
+   {..., "tokenFormat":"JWT-Custom",
+         "tokenFields":["Owner","Name","Id","Type","DisplayName","Avatar","Email","Groups","Roles"]}
+   ```
+   验证：重取 token，`passwordSalt` 应消失，claim 数从 80+ 降到 ~20，`groups/roles/email/sub` 仍在。
 
 > 注册后你只需 4 个环境变量：`CASDOOR_ENDPOINT`、`CASDOOR_CLIENT_ID`、`CASDOOR_CLIENT_SECRET`、`CASDOOR_ORG`（飞书用户所在 org）。
 
