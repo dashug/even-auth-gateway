@@ -1,10 +1,18 @@
 """治理服务 FastAPI 组装:webhook 路由 + 飞书卡片回调。
-飞书集成与配置均为网关自带(even_auth_gov.feishu / .settings),不依赖 cshub。"""
+飞书集成与配置均为网关自带(even_auth_gov.feishu / .settings),不依赖 cshub。
+
+Lifespan wires up two background pieces (skipped under TESTING so existing
+app-wiring tests stay green):
+  ② Feishu WS long-connection — offboarding events + card callback
+  ③ Daily reconcile scheduler
+"""
 from __future__ import annotations
+import asyncio
+import contextlib
 import os
 import httpx
 from fastapi import FastAPI, Request, Response
-from even_auth_gov import webhook as wh, decision, settings
+from even_auth_gov import webhook as wh, decision, settings, feishu_ws, scheduler
 
 def _casdoor_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=settings.casdoor_endpoint())
@@ -12,8 +20,24 @@ def _casdoor_client() -> httpx.AsyncClient:
 def _owner() -> str:
     return settings.approver_feishu_id()
 
+def _truthy(val: str) -> bool:
+    return val.strip().lower() not in ("", "0", "false", "no")
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
+    testing = bool(os.getenv("TESTING"))
+    if not testing and _truthy(os.getenv("CHANNEL_CLIENTS_ENABLED", "true")):
+        feishu_ws.start_ws(asyncio.get_running_loop())
+    if not testing and _truthy(os.getenv("SCHEDULER_ENABLED", "true")):
+        scheduler.start_scheduler()
+    try:
+        yield
+    finally:
+        scheduler.stop_scheduler()
+        feishu_ws.stop_ws()
+
 def build_app() -> FastAPI:
-    app = FastAPI(title="even-auth-gov")
+    app = FastAPI(title="even-auth-gov", lifespan=_lifespan)
 
     async def _send_card(info: dict):
         if os.getenv("TESTING"):
