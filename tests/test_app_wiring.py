@@ -31,18 +31,12 @@ def test_webhook_route_custom_header_name(monkeypatch, tmp_path):
         r = c.post("/casdoor/webhook", content=body, headers={"Authorization": "shh"})
         assert r.status_code == 200
 
-def test_card_callback_routes_to_decision(monkeypatch, tmp_path):
+def test_no_unauthenticated_http_card_route(monkeypatch, tmp_path):
+    """安全回归:卡片回调只走 WS(SDK 验签)。禁止存在明文 HTTP /feishu/card 路由——
+    否则任何人可 curl 伪造 operator.open_id 自助批准。见 casdoor-findings / 设计评审 #1。"""
     app = _app(monkeypatch, tmp_path)
-    from even_auth_gov import approval_store, app as appmod
-    approval_store.mark_pending("ou_a", {"name": "申请人"})
-    # stub decision + config so the card callback is deterministic
-    async def fake_decision(action, operator_id, owner, sso_open_id, client):
-        return {"status": "ok", "message": f"Approved: {sso_open_id}"}
-    monkeypatch.setattr(appmod.decision, "handle", fake_decision)
-    monkeypatch.setattr(appmod, "_owner", lambda: "ou_boss")
     with TestClient(app) as c:
         payload = {"operator": {"open_id": "ou_boss"},
                    "action": {"value": {"action": "sso_approve", "sso_open_id": "ou_a"}}}
         r = c.post("/feishu/card", json=payload)
-        assert r.status_code == 200
-        assert r.json()["toast"]["type"] == "success"
+        assert r.status_code == 404  # 路由已移除,伪造审批无门可入

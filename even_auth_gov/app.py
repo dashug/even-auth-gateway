@@ -10,12 +10,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import httpx
 from fastapi import FastAPI, Request, Response
-from even_auth_gov import webhook as wh, decision, settings, feishu_ws, scheduler
-
-def _casdoor_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=settings.casdoor_endpoint())
+from even_auth_gov import webhook as wh, settings, feishu_ws, scheduler
 
 def _owner() -> str:
     return settings.approver_feishu_id()
@@ -58,14 +54,8 @@ def build_app() -> FastAPI:
         result = await wh.handle(body, token)
         return Response(status_code=401 if result["status"] == "rejected" else 200)
 
-    @app.post("/feishu/card")
-    async def feishu_card(request: Request):
-        payload = await request.json()
-        value = (payload.get("action") or {}).get("value", {})
-        operator = (payload.get("operator") or {}).get("open_id", "")
-        async with _casdoor_client() as client:
-            r = await decision.handle(value.get("action", ""), operator_id=operator, owner=_owner(),
-                                      sso_open_id=value.get("sso_open_id", ""), client=client)
-        return {"toast": {"type": "success" if r["status"] == "ok" else "error", "content": r["message"]}}
-
+    # 飞书审批卡片回调走 WS 长连接(feishu_ws._on_card,由 lark-oapi SDK 验证来源),不开 HTTP 路由。
+    # 明文 HTTP 回调无法验证飞书来源:operator.open_id 不是密文(出现在日志/卡片/组成员 API 里、可枚举),
+    # 一旦暴露 = "任何能网络触达的人一条 curl 即可伪造审批、自助给自己开通所有应用"。
+    # 若将来确需 HTTP 回调模式,必须实现完整飞书回调契约(url_verification + verification_token + encrypt_key AES 解密 + 验签)后再开。
     return app
