@@ -7,6 +7,13 @@ from even_auth_gov import offboard
 
 logger = logging.getLogger(__name__)
 
+# 飞书 get-user 对"open_id 不存在(硬删除)"返回此 code(实测 2026-07-08)。
+# 区别于超时/5xx 等瞬时错误 —— 前者=人没了要禁用,后者=API 抖动要 fail-open。
+FEISHU_USER_NOT_FOUND = 99992351
+
+class FeishuUserNotFound(Exception):
+    """飞书里已查无此 open_id(硬删除)。视为离职,须禁用。"""
+
 async def fetch_feishu_status(open_id: str):
     """查飞书用户状态对象(有 is_frozen/is_resigned/is_exited);复用 CS Hub get_client + contact.v3.user.aget。"""
     from even_auth_gov.feishu import get_client
@@ -15,6 +22,8 @@ async def fetch_feishu_status(open_id: str):
     req = GetUserRequest.builder().user_id(open_id).user_id_type("open_id").build()
     resp = await client.contact.v3.user.aget(req)
     if not resp.success():
+        if resp.code == FEISHU_USER_NOT_FOUND:
+            raise FeishuUserNotFound(open_id)
         raise RuntimeError(f"feishu get-user {resp.code} {resp.msg}")
     return resp.data.user.status if resp.data and resp.data.user else None
 
@@ -39,8 +48,15 @@ async def run(client) -> None:
     for open_id in _open_ids_by_status("approved"):
         try:
             status = await fetch_feishu_status(open_id)
+        except FeishuUserNotFound:
+            # #5 修复:硬删除的用户,飞书查无此人 → 视为离职禁用,不再 fail-open 永久漏掉。
+            # (残余风险:该 code 也覆盖"格式非法 id",但 store 里的 id 均来自真实登录、格式合法 → 命中即真删除)
+            logger.warning("Reconcile: %s 在飞书已不存在(硬删除)→ 禁用", open_id)
+            await offboard.apply(open_id, "", "reconcile-deleted", client)
+            continue
         except Exception as e:
-            logger.warning("Reconcile: feishu status error for %s: %s — leaving untouched", open_id, e)
+            # 瞬时错误(超时/5xx/限流):fail-open 不误禁,等下次对账
+            logger.warning("Reconcile: feishu status error for %s: %s — leaving untouched (fail-open)", open_id, e)
             continue
         if offboard.offboard_flags(status):
             await offboard.apply(open_id, "", "reconcile", client)
