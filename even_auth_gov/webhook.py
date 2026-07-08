@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 import hmac, json, logging, os
-from even_auth_gov import approval_store
+from even_auth_gov import approval_store, settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +59,16 @@ async def handle(body: bytes, token: str) -> dict:
     open_id = user.get("id") or ""
     if not open_id:
         return {"status": "ignored"}
+    # Casdoor signup webhook 不带 app 信息(它不知道用户是为哪个应用注册的) ——
+    # 落到 default_app() 上,与现有 cs-hub 试点保持向后兼容。
+    app = settings.default_app()
     is_new = approval_store.mark_pending(
-        open_id, {"name": user.get("name", ""), "email": user.get("email", "")}
+        open_id, app, {"name": user.get("name", ""), "email": user.get("email", "")}
     )
     if is_new:
         await send_approval_card(
-            {"open_id": open_id, "name": user.get("name", ""), "email": user.get("email", "")}
+            {"open_id": open_id, "name": user.get("name", ""), "email": user.get("email", ""), "app": app}
         )
         # 发送成功才留痕;若上面抛异常则 notified_at 保持空,reconcile 会补发(#12)
-        approval_store.mark_notified(open_id)
+        approval_store.mark_notified(open_id, app)
     return {"status": "ok"}

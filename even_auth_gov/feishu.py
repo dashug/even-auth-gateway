@@ -83,9 +83,18 @@ async def send_card(receive_id: str, card: dict, receive_id_type: str = "open_id
     return True
 
 
-def build_sso_approval_card(open_id: str, name: str, email: str = "") -> dict:
-    """Build the admin-approval card for a Feishu SSO login application."""
+def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "") -> dict:
+    """Build the admin-approval card for a Feishu SSO login application.
+
+    `app` identifies which downstream application this applicant is requesting
+    access to (design-review #2/#16: the card must carry app identity so an
+    approval for app A can never be mistaken for — or silently grant — access
+    to app B). It rides along in both button `value` payloads so
+    feishu_ws._on_card / decision.handle can act on the right (open_id, app)
+    pair, and is surfaced in the card text for the human approver.
+    """
     email_line = f"\n**企业邮箱:** {email}" if email else ""
+    app_line = f"\n**申请接入应用:** {app}" if app else ""
     return {
         "config": {"wide_screen_mode": True},
         "header": {
@@ -95,7 +104,7 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "") -> dict:
         "elements": [
             {
                 "tag": "markdown",
-                "content": f"**申请人:** {name}{email_line}\n\n批准后对方重新扫码即可进入管理后台。",
+                "content": f"**申请人:** {name}{email_line}{app_line}\n\n批准后对方重新扫码即可进入管理后台。",
             },
             {"tag": "hr"},
             {
@@ -105,13 +114,13 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "") -> dict:
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": "批准 ✅"},
                         "type": "primary",
-                        "value": {"action": "sso_approve", "sso_open_id": open_id},
+                        "value": {"action": "sso_approve", "sso_open_id": open_id, "app": app},
                     },
                     {
                         "tag": "button",
                         "text": {"tag": "plain_text", "content": "拒绝"},
                         "type": "danger",
-                        "value": {"action": "sso_deny", "sso_open_id": open_id},
+                        "value": {"action": "sso_deny", "sso_open_id": open_id, "app": app},
                     },
                 ],
             },

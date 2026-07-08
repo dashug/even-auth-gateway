@@ -9,6 +9,17 @@ def approver_feishu_id() -> str:
     return os.getenv("APPROVER_FEISHU_ID", "")
 
 
+def default_app() -> str:
+    """未指定 app 时的默认应用名 —— 向后兼容现有的 cs-hub 试点(老 signup webhook 不带 app)。"""
+    return os.getenv("DEFAULT_APP", "cs-hub")
+
+
+def approver_for(app: str) -> str:
+    """按应用定制审批人:APPROVER_<APP>(大写、'-'→'_')未配则回退全局 APPROVER_FEISHU_ID。"""
+    env_name = f"APPROVER_{app.upper().replace('-', '_')}"
+    return os.getenv(env_name, "") or approver_feishu_id()
+
+
 def casdoor_endpoint() -> str:
     return os.getenv("CASDOOR_ENDPOINT", "http://127.0.0.1:8000")
 

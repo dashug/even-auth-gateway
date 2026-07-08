@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import lark_oapi
 
@@ -120,3 +121,52 @@ def test_start_ws_second_call_is_idempotent(monkeypatch):
         feishu_ws.stop_ws()
         loop.close()
         _reset()
+
+
+# ── APP-AWARE (design-review #2/#16): _process_card extracts app identity ──
+
+def _card_data(value: dict, operator_open_id: str = "ou_boss"):
+    return SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(value=value),
+        operator=SimpleNamespace(open_id=operator_open_id),
+    ))
+
+
+def test_process_card_extracts_app_and_uses_its_approver(monkeypatch):
+    from even_auth_gov import decision
+
+    captured = {}
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client):
+        captured.update(action=action, operator_id=operator_id, owner=owner, sso_open_id=sso_open_id, app=app)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_app_b_boss")
+
+    data = _card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"}, operator_open_id="ou_app_b_boss")
+    asyncio.run(feishu_ws._process_card(data))
+
+    assert captured["app"] == "app-b"
+    assert captured["sso_open_id"] == "ou_x"
+    assert captured["operator_id"] == "ou_app_b_boss"
+    assert captured["owner"] == "ou_app_b_boss"   # per-app approver, not necessarily the global default
+
+
+def test_process_card_defaults_app_for_old_cards_without_app_field(monkeypatch):
+    from even_auth_gov import decision
+
+    captured = {}
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client):
+        captured["app"] = app
+        return {"status": "ok"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("DEFAULT_APP", "cs-hub")
+    monkeypatch.delenv("APPROVER_CS_HUB", raising=False)
+
+    data = _card_data({"action": "sso_approve", "sso_open_id": "ou_x"})  # no "app" key — pre-upgrade card
+    asyncio.run(feishu_ws._process_card(data))
+
+    assert captured["app"] == "cs-hub"

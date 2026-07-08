@@ -67,12 +67,15 @@ async def _process_card(data) -> None:
         value = {}
 
     operator_id = operator.open_id if operator else ""
+    # 老卡片(升级前发出、还没批的)没有 app 字段 —— 兜底到 default_app() 保持向后兼容。
+    app = value.get("app") or settings.default_app()
     async with httpx.AsyncClient(base_url=settings.casdoor_endpoint()) as client:
         await decision.handle(
             value.get("action", ""),
             operator_id=operator_id,
-            owner=settings.approver_feishu_id(),
+            owner=settings.approver_for(app),
             sso_open_id=value.get("sso_open_id", ""),
+            app=app,
             client=client,
         )
 

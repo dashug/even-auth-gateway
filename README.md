@@ -14,20 +14,22 @@
 | 文件 | 职责 |
 |---|---|
 | `casdoor_admin.py` | Casdoor Admin API（按飞书 open_id 加组/移组/禁用/反查），已对活实例验证 |
-| `approval_store.py` | 审批工作流状态机（pending/approved/denied/disabled） |
-| `decision.py` | 卡片审批决策（审批人校验 + 幂等 + 批准→加组） |
-| `webhook.py` | Casdoor webhook 接收 + 验签 + 推审批卡片 |
-| `offboard.py` | 离职引擎 → Casdoor 禁用 + 移组 |
+| `approval_store.py` | 审批工作流状态机,按 `(open_id, app)` 记（pending/approved/denied/disabled） |
+| `decision.py` | 卡片审批决策（审批人校验 + 幂等 + 批准→加对应 app 的组） |
+| `webhook.py` | Casdoor webhook 接收 + 验签 + 推审批卡片（落到 `DEFAULT_APP`） |
+| `offboard.py` | 离职引擎 → 按用户禁用 Casdoor + 逐个 app 移组 |
 | `ws_events.py` | 飞书 contact 事件（deleted/updated）→ 离职 |
-| `reconcile.py` | 每日对账兜底（fail-open） |
-| `migrate_emails.py` | 邮箱白名单 → Casdoor 组 迁移 |
-| `app.py` | FastAPI 组装（webhook 路由 + 卡片回调） |
-| `feishu.py` | 网关自带飞书集成（client/发消息/卡片构建） |
-| `settings.py` | 环境变量配置（审批人 open_id、Casdoor 端点） |
+| `reconcile.py` | 每日对账兜底（fail-open,按用户去重） |
+| `migrate_emails.py` | 邮箱白名单 → Casdoor 组 迁移（cs-hub 试点） |
+| `app.py` | FastAPI 组装（webhook 路由 + `/request-access` + 卡片回调） |
+| `feishu.py` | 网关自带飞书集成（client/发消息/卡片构建,卡片带 app 标识） |
+| `settings.py` | 环境变量配置（审批人 open_id、按应用覆盖、Casdoor 端点） |
 
 ## 关键设计
 
-- 认证/授权分离：Casdoor 答"你是谁"（飞书 open_id = OIDC `sub`）；准入 = `approved-operators` 组成员（org 限定 `<org>/approved-operators`，进 id_token `groups` claim）。
+- 认证/授权分离：Casdoor 答"你是谁"（飞书 open_id = OIDC `sub`）；准入 = 按应用区分的 `approved-<app>` 组成员（org 限定 `<org>/approved-<app>`，进 id_token `groups` claim）。**APP-AWARE**（设计评审 #2/#16）：准入按 `(open_id, app)` 记，同一用户可对应用 A 待批、对应用 B 已批，互不影响；只有离职（禁用 Casdoor 账号）是按用户一次性生效，会清掉该用户在**所有**应用上的准入。
+- 第一个接入的应用（默认 `cs-hub`，见 `DEFAULT_APP`）走 Casdoor signup webhook 自动建 pending；第二个及以后的应用用 `POST /request-access`（同一套共享 token 鉴权）主动上报"某用户在等本应用批准"。
+- 审批人可按应用覆盖（`APPROVER_<APP>`，未配落到全局 `APPROVER_FEISHU_ID`），审批卡片上明确标出申请接入的应用。
 - 离职撤销：短 token + 中心拦截（禁用即挡登录 + 应用刷新回 Casdoor 复验）。
 - 详见 `docs/design.md`、`docs/implementation-plan.md`、`docs/casdoor-findings.md`（Phase 0 对活实例的实测结论）。
 
@@ -35,11 +37,13 @@
 
 ```
 FEISHU_APP_ID / FEISHU_APP_SECRET     # 飞书应用(用于发卡片、查 contact 状态、离职事件)
-APPROVER_FEISHU_ID                    # 审批人 open_id
+APPROVER_FEISHU_ID                    # 全局审批人 open_id(未按应用覆盖时的兜底)
+APPROVER_<APP>                        # 按应用覆盖审批人,如 APPROVER_CS_HUB(app 名转大写、'-'→'_')
+DEFAULT_APP                           # Casdoor signup webhook 不带 app 信息时的默认应用名(默认 cs-hub)
 CASDOOR_ENDPOINT                      # Casdoor 地址
 CASDOOR_CLIENT_ID / CASDOOR_CLIENT_SECRET  # 调 Casdoor Admin API 的凭据
 CASDOOR_ORG                           # 飞书用户所在 org
-CASDOOR_WEBHOOK_SECRET                # webhook 共享 token(Casdoor webhook 自定义头里配同值)
+CASDOOR_WEBHOOK_SECRET                # webhook 共享 token(Casdoor webhook 自定义头里配同值;/request-access 复用同一套)
 CASDOOR_WEBHOOK_HEADER                # webhook 携带 token 的头名(默认 X-Webhook-Token,须与 Casdoor 后台一致)
 APPROVAL_STORE_FILE                   # 审批状态文件路径
 ```
