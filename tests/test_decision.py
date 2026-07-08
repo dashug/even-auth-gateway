@@ -6,8 +6,10 @@ def _setup(monkeypatch, tmp_path):
     approval_store.mark_pending("ou_a", {"name": "申请人"})
     calls = []
     async def fake_add(client, user_id, group): calls.append(("add", user_id, group)); return True
+    async def fake_remove(client, user_id, group): calls.append(("remove", user_id, group)); return True
     async def fake_disable(client, user_id): calls.append(("disable", user_id)); return True
     monkeypatch.setattr(decision.ca, "add_to_group", fake_add)
+    monkeypatch.setattr(decision.ca, "remove_from_group", fake_remove)
     monkeypatch.setattr(decision.ca, "disable_user", fake_disable)
     return calls
 
@@ -18,11 +20,12 @@ def test_approve_by_owner_adds_to_group(monkeypatch, tmp_path):
     assert ("add", "ou_a", "approved-operators") in calls
     assert approval_store.get("ou_a")["status"] == "approved"
 
-def test_deny_by_owner_marks_denied(monkeypatch, tmp_path):
-    _setup(monkeypatch, tmp_path)
+def test_deny_by_owner_marks_denied_and_revokes_group(monkeypatch, tmp_path):
+    calls = _setup(monkeypatch, tmp_path)
     r = asyncio.run(decision.handle("sso_deny", operator_id="ou_boss", owner="ou_boss", sso_open_id="ou_a", client=None))
     assert r["status"] == "ok"
     assert approval_store.get("ou_a")["status"] == "denied"
+    assert ("remove", "ou_a", "approved-operators") in calls   # #11:拒绝也撤 Casdoor 组
 
 def test_approve_by_stranger_rejected(monkeypatch, tmp_path):
     calls = _setup(monkeypatch, tmp_path)

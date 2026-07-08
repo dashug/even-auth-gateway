@@ -66,4 +66,6 @@ async def handle(body: bytes, token: str) -> dict:
         await send_approval_card(
             {"open_id": open_id, "name": user.get("name", ""), "email": user.get("email", "")}
         )
+        # 发送成功才留痕;若上面抛异常则 notified_at 保持空,reconcile 会补发(#12)
+        approval_store.mark_notified(open_id)
     return {"status": "ok"}

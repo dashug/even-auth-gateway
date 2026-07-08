@@ -52,6 +52,19 @@ def test_reconcile_disables_hard_deleted_but_failopen_on_transient(monkeypatch, 
     assert ("ou_gone", "reconcile-deleted") in disabled   # 硬删除 → 禁用
     assert all(o != "ou_down" for o, _ in disabled)        # 瞬时错 → fail-open,不动
 
+def test_reconcile_resends_only_unnotified_pending(monkeypatch, tmp_path):
+    # #12:待审批卡片发失败(notified_at 空)→ 对账补发;刚通知过的不重发。
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    from even_auth_gov import webhook, approval_store
+    approval_store.mark_pending("ou_stuck", {"name": "S"})                             # notified_at=""
+    approval_store.mark_pending("ou_ok", {"name": "O"}); approval_store.mark_notified("ou_ok")
+    sent = []
+    async def fake_send(info): sent.append(info["open_id"])
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    asyncio.run(reconcile.run(client=None))
+    assert sent == ["ou_stuck"]                                    # 只补发没送达的
+    assert approval_store.get("ou_stuck")["notified_at"]           # 补发后留痕
+
 def test_reconcile_retries_disable_failed(monkeypatch, tmp_path):
     # #4 兜底:上次禁用失败的记录,每日对账优先重试(reason=reconcile-retry)。
     monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))

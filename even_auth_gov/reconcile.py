@@ -2,10 +2,14 @@
 API 错误 fail-open(飞书 get-user 无可靠 not-found 码,见 CS Hub 前置 spec)。"""
 from __future__ import annotations
 import json, logging, os
+from datetime import datetime, timezone
 from pathlib import Path
 from even_auth_gov import offboard
 
 logger = logging.getLogger(__name__)
+
+# 待审批卡片补发阈值:发失败(notified_at 空)必补;成功但超此秒数仍 pending 也重发一次催办。
+_PENDING_RESEND_SECONDS = int(os.getenv("SSO_PENDING_RESEND_SECONDS", str(86400)))
 
 # 飞书 get-user 对"open_id 不存在(硬删除)"返回此 code(实测 2026-07-08)。
 # 区别于超时/5xx 等瞬时错误 —— 前者=人没了要禁用,后者=API 抖动要 fail-open。
@@ -27,19 +31,49 @@ async def fetch_feishu_status(open_id: str):
         raise RuntimeError(f"feishu get-user {resp.code} {resp.msg}")
     return resp.data.user.status if resp.data and resp.data.user else None
 
-def _open_ids_by_status(*statuses: str) -> list[str]:
+def _all_records() -> dict:
     raw = os.getenv("APPROVAL_STORE_FILE", "").strip() or "data/approvals.json"
     p = Path(raw)
     if not p.exists():
-        return []
+        return {}
     try:
         recs = json.loads(p.read_text(encoding="utf-8")).get("records", {})
+        return recs if isinstance(recs, dict) else {}
     except Exception:
-        return []
+        return {}
+
+def _open_ids_by_status(*statuses: str) -> list[str]:
     want = set(statuses)
-    return [oid for oid, r in recs.items() if r.get("status") in want]
+    return [oid for oid, r in _all_records().items() if r.get("status") in want]
+
+def _pending_needing_card() -> list[dict]:
+    """待审批但卡片没送达(notified_at 空)或催办到期的记录。"""
+    out, now = [], datetime.now(timezone.utc)
+    for oid, r in _all_records().items():
+        if r.get("status") != "pending":
+            continue
+        na = r.get("notified_at") or ""
+        if not na:
+            out.append(r); continue
+        try:
+            if (now - datetime.fromisoformat(na)).total_seconds() > _PENDING_RESEND_SECONDS:
+                out.append(r)
+        except Exception:
+            out.append(r)
+    return out
 
 async def run(client) -> None:
+    # 0) 补发卡住的待审批卡片(#12:发失败/审批人误配 → 不再永久 pending 无人知)
+    from even_auth_gov import webhook, approval_store
+    for r in _pending_needing_card():
+        try:
+            await webhook.send_approval_card(
+                {"open_id": r.get("open_id", ""), "name": r.get("name", ""), "email": r.get("email", "")}
+            )
+            approval_store.mark_notified(r.get("open_id", ""))
+            logger.info("Reconcile: 补发待审批卡片 %s", r.get("open_id"))
+        except Exception as e:
+            logger.warning("Reconcile: 补发卡片失败 %s: %s", r.get("open_id"), e)
     # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
     for open_id in _open_ids_by_status("disable_failed"):
         logger.info("Reconcile: 重试上次禁用失败的 %s", open_id)

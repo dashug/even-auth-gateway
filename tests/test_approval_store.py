@@ -28,3 +28,32 @@ def test_get_returns_copy(monkeypatch, tmp_path):
     s.mark_pending("ou_z", {"name": "W"})
     rec = s.get("ou_z"); rec["status"] = "hacked"
     assert s.get("ou_z")["status"] == "pending"  # mutating the returned dict must not corrupt the store
+
+def test_disabled_user_signup_replay_not_reset_to_pending(monkeypatch, tmp_path):
+    # #15 安全:离职(disabled)用户的 signup 重放不得把他重置回 pending(否则可再被批准重新开通)
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_d", {"name": "D"}); s.mark_approved("ou_d", "b"); s.mark_disabled("ou_d", "exit")
+    assert s.mark_pending("ou_d", {"name": "D"}) is False   # 不重置、不发卡
+    assert s.get("ou_d")["status"] == "disabled"
+
+def test_approved_user_signup_replay_keeps_approved(monkeypatch, tmp_path):
+    # #15:已批准用户的 signup 重放不得丢掉 approved 状态
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_a", {"name": "A"}); s.mark_approved("ou_a", "b")
+    assert s.mark_pending("ou_a", {"name": "A"}) is False
+    assert s.get("ou_a")["status"] == "approved"
+
+def test_denied_user_may_reapply(monkeypatch, tmp_path):
+    # #15:被拒用户允许重新申请(建新 pending + 发卡)
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_r", {"name": "R"}); s.mark_denied("ou_r", "b")
+    assert s.mark_pending("ou_r", {"name": "R"}) is True
+    assert s.get("ou_r")["status"] == "pending"
+
+def test_mark_notified_records_timestamp(monkeypatch, tmp_path):
+    # #12:发卡成功留痕
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_n", {"name": "N"})
+    assert s.get("ou_n")["notified_at"] == ""
+    s.mark_notified("ou_n")
+    assert s.get("ou_n")["notified_at"]   # 非空

@@ -23,5 +23,10 @@ async def handle(action: str, operator_id: str, owner: str, sso_open_id: str, cl
             return {"status": "error", "message": "Casdoor add-to-group failed; retry"}
         approval_store.mark_approved(sso_open_id, operator_id)
         return {"status": "ok", "message": f"Approved: {rec.get('name','')}"}
+    # 拒绝:#11 也撤 Casdoor 组(防御:即便此前误入准入组,拒绝即清干净)
+    try:
+        await ca.remove_from_group(client, user_id=sso_open_id, group=APPROVED_GROUP)
+    except Exception as e:
+        logger.warning("Deny 撤组失败 %s: %s(已标 denied,非致命)", sso_open_id, e)
     approval_store.mark_denied(sso_open_id, operator_id)
     return {"status": "ok", "message": f"Denied: {rec.get('name','')}"}

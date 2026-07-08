@@ -7,8 +7,13 @@
 本模块函数的 user_id 参数 = 飞书 open_id(内部解析成 <owner>/<name>)。
 """
 from __future__ import annotations
-import logging, os
+import asyncio, logging, os
 import httpx
+
+# #13:组是"整数组读-改-写"(GET user → 改 groups → POST columns=groups),并发加/移组会丢写。
+# 进程内串行锁保证同一进程内组变更不交错。(多副本部署需再上升到分布式锁/Casdoor 端原子操作——见 README 单实例约束。)
+# disable_user 走 columns=isForbidden,与组是不同列、Casdoor 只更新指定列 → 不与组操作互相覆盖,无需同锁。
+_GROUP_LOCK = asyncio.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -51,24 +56,26 @@ def _casdoor_id(u: dict) -> str:
 
 async def add_to_group(client: httpx.AsyncClient, user_id: str, group: str) -> bool:
     """user_id = 飞书 open_id。org 限定的 group 加入用户 groups 列表。"""
-    u = await _get_by_open_id(client, user_id)
-    if u is None:
-        return False
-    qgroup = _qualified(group)
-    groups = list(u.get("groups") or [])
-    if qgroup in groups:
-        return True
-    groups.append(qgroup)
-    u["groups"] = groups
-    return await _update_user(client, _casdoor_id(u), u, "groups")
+    async with _GROUP_LOCK:
+        u = await _get_by_open_id(client, user_id)
+        if u is None:
+            return False
+        qgroup = _qualified(group)
+        groups = list(u.get("groups") or [])
+        if qgroup in groups:
+            return True
+        groups.append(qgroup)
+        u["groups"] = groups
+        return await _update_user(client, _casdoor_id(u), u, "groups")
 
 async def remove_from_group(client: httpx.AsyncClient, user_id: str, group: str) -> bool:
-    u = await _get_by_open_id(client, user_id)
-    if u is None:
-        return False
-    qgroup = _qualified(group)
-    u["groups"] = [g for g in (u.get("groups") or []) if g != qgroup]
-    return await _update_user(client, _casdoor_id(u), u, "groups")
+    async with _GROUP_LOCK:
+        u = await _get_by_open_id(client, user_id)
+        if u is None:
+            return False
+        qgroup = _qualified(group)
+        u["groups"] = [g for g in (u.get("groups") or []) if g != qgroup]
+        return await _update_user(client, _casdoor_id(u), u, "groups")
 
 async def disable_user(client: httpx.AsyncClient, user_id: str) -> bool:
     u = await _get_by_open_id(client, user_id)
