@@ -1,37 +1,43 @@
-# 统一飞书登录网关 — Casdoor 地基（Phase 0 spike / 本地验证用）
+# 统一飞书登录网关 — Casdoor 地基
 # 起：  docker compose -f deploy/casdoor/docker-compose.yml up -d
 # 停：  docker compose -f deploy/casdoor/docker-compose.yml down
 # 清库：docker compose -f deploy/casdoor/docker-compose.yml down -v
 #
-# 生产部署时把 casdoor 挂到 nginx 反代的 auth 子域，并用强密码 + 独立 .env。
+# 配置走同目录 .env（见 .env.example）。默认值仅供本地 spike；生产必须：
+#   ① 用强 CASDOOR_DB_PASSWORD  ② 首次登录立刻改内置 admin/123 密码
+#   ③ 把镜像 tag 钉到具体 digest（不用 :latest）  ④ 前置 nginx 做 TLS + auth 子域
+#   ⑤ 配好 backup.sh 的定时备份（见 README「备份/恢复」）
 services:
   casdoor-db:
     image: postgres:16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: casdoor
-      POSTGRES_PASSWORD: casdoor_local_pw
-      POSTGRES_DB: casdoor
+      POSTGRES_USER: ${CASDOOR_DB_USER:-casdoor}
+      POSTGRES_PASSWORD: ${CASDOOR_DB_PASSWORD:-casdoor_local_pw}
+      POSTGRES_DB: ${CASDOOR_DB_NAME:-casdoor}
     volumes:
       - casdoor_pg:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5433:5432"   # 仅本地，避免撞占用
+      - "127.0.0.1:${CASDOOR_DB_PORT:-5433}:5432"   # 仅本地暴露；生产可去掉整个 ports
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U casdoor"]
+      test: ["CMD-SHELL", "pg_isready -U ${CASDOOR_DB_USER:-casdoor}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   casdoor:
-    image: casbin/casdoor:latest
+    # 生产把 :latest 换成钉住的 digest，例如 casbin/casdoor@sha256:...
+    image: ${CASDOOR_IMAGE:-casbin/casdoor:latest}
+    restart: unless-stopped
     depends_on:
       casdoor-db:
         condition: service_healthy
     environment:
       RUNNING_IN_DOCKER: "true"
       driverName: postgres
-      dataSourceName: "user=casdoor password=casdoor_local_pw host=casdoor-db port=5432 sslmode=disable dbname=casdoor"
+      dataSourceName: "user=${CASDOOR_DB_USER:-casdoor} password=${CASDOOR_DB_PASSWORD:-casdoor_local_pw} host=casdoor-db port=5432 sslmode=disable dbname=${CASDOOR_DB_NAME:-casdoor}"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${CASDOOR_PORT:-8000}:8000"   # 生产由 nginx 反代，仅本地暴露
 
 volumes:
   casdoor_pg:

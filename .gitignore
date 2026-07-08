@@ -5,3 +5,7 @@ venv/
 data/
 *.tmp
 .pytest_cache/
+.DS_Store
+# 密钥与备份绝不入库
+deploy/casdoor/.env
+deploy/casdoor/backups/

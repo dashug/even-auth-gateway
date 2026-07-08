@@ -86,3 +86,40 @@ findings 记：webhook body 结构；**是否带签名头（HMAC?）及验签方
 5 项（飞书登录 / 组 claim / Admin API / 禁用杀会话 / webhook）都在 findings 记为可行
 （或有可接受 fallback）后，回来找我：我据 findings 校准 Phase 1 占位端点 + 做 Phase 2（CS Hub 改 OIDC 客户端）。
 任一硬失败 → 回设计 spec 调整对应环节，别硬往下盖。
+
+---
+
+# 生产部署（上线前清单）
+
+配置全走同目录 `.env`（`cp .env.example .env` 后改），compose 自动读取。
+
+1. **强 DB 密码**：`.env` 里设 `CASDOOR_DB_PASSWORD` 为强随机值（默认值只配 spike 用）。
+2. **改内置 admin 密码**：首次登录 Casdoor 立刻把内置 `admin/123` 改掉——它是 IdP 的超管，不改等于门大开。
+3. **钉镜像 digest**：`CASDOOR_IMAGE=casbin/casdoor@sha256:...`，别用 `:latest`（可复现 + 防上游意外变更）。
+4. **nginx 前置 TLS**：casdoor 只 `127.0.0.1:8000` 暴露，由 nginx 反代到 auth 子域做 HTTPS；生产可把 db 的 `ports` 整段删掉（只走 compose 内网）。
+5. **治理服务密钥入密管**：`FEISHU_APP_SECRET / CASDOOR_CLIENT_SECRET / CASDOOR_WEBHOOK_SECRET / SESSION_SECRET` 不写死。
+6. **id_token 裁字段**：每个接入应用设 `tokenFormat=JWT-Custom` + `tokenFields` 白名单（见 `docs/casdoor-findings.md` §id_token，`passwordSalt` 等敏感字段必裁）。
+
+## 备份 / 恢复（务必配）
+
+**Casdoor 的 postgres 卷是唯一身份真理源——丢了它 = 丢全部用户/组/角色/应用配置。**
+
+备份（cron 每日 + backups/ 同步异地）：
+```
+deploy/casdoor/backup.sh
+# cron: 0 3 * * *  /path/to/even-auth-gateway/deploy/casdoor/backup.sh >> /var/log/casdoor-backup.log 2>&1
+```
+
+恢复（从某份备份重建库）：
+```
+gunzip -c deploy/casdoor/backups/casdoor-<ts>.sql.gz \
+  | docker compose -f deploy/casdoor/docker-compose.yml exec -T casdoor-db psql -U casdoor casdoor
+```
+
+## 单实例约束（重要）
+
+`even-auth-gov` 治理服务目前设计为**单实例**运行，原因：
+- 飞书 WS 长连接（离职事件 + 卡片回调）单连接即可，多实例会重复处理；
+- 审批状态是 JSON 文件 + 进程内/文件锁，Casdoor 组变更是进程内串行锁——**跨实例不互斥**。
+
+所以：**跑 1 个副本**（要高可用用主备/重启拉起，不要多活）。将来要多活，需把审批状态挪到共享存储（如 postgres）并给 Casdoor 组变更上分布式锁——那是另一轮改造，不在当前范围。
