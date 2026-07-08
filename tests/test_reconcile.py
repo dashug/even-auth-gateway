@@ -35,3 +35,16 @@ def test_reconcile_only_touches_approved(monkeypatch, tmp_path):
 def test_reconcile_empty_store_noop(monkeypatch, tmp_path):
     monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
     asyncio.run(reconcile.run(client=None))   # must not raise on empty/missing store
+
+def test_reconcile_retries_disable_failed(monkeypatch, tmp_path):
+    # #4 兜底:上次禁用失败的记录,每日对账优先重试(reason=reconcile-retry)。
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    approval_store.mark_pending("ou_df", {"name": "df"}); approval_store.mark_disable_failed("ou_df", "prev fail")
+    approval_store.mark_pending("ou_ok", {"name": "o"}); approval_store.mark_approved("ou_ok", "b")
+    applied = []
+    async def fake_apply(open_id, name, reason, client): applied.append((open_id, reason))
+    async def fake_status(open_id): return _status()
+    monkeypatch.setattr(reconcile.offboard, "apply", fake_apply)
+    monkeypatch.setattr(reconcile, "fetch_feishu_status", fake_status)
+    asyncio.run(reconcile.run(client=None))
+    assert ("ou_df", "reconcile-retry") in applied   # disable_failed 被优先重试

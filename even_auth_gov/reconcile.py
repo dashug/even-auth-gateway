@@ -18,7 +18,7 @@ async def fetch_feishu_status(open_id: str):
         raise RuntimeError(f"feishu get-user {resp.code} {resp.msg}")
     return resp.data.user.status if resp.data and resp.data.user else None
 
-def _approved_open_ids() -> list[str]:
+def _open_ids_by_status(*statuses: str) -> list[str]:
     raw = os.getenv("APPROVAL_STORE_FILE", "").strip() or "data/approvals.json"
     p = Path(raw)
     if not p.exists():
@@ -27,10 +27,16 @@ def _approved_open_ids() -> list[str]:
         recs = json.loads(p.read_text(encoding="utf-8")).get("records", {})
     except Exception:
         return []
-    return [oid for oid, r in recs.items() if r.get("status") == "approved"]
+    want = set(statuses)
+    return [oid for oid, r in recs.items() if r.get("status") in want]
 
 async def run(client) -> None:
-    for open_id in _approved_open_ids():
+    # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
+    for open_id in _open_ids_by_status("disable_failed"):
+        logger.info("Reconcile: 重试上次禁用失败的 %s", open_id)
+        await offboard.apply(open_id, "", "reconcile-retry", client)
+    # 2) 常规对账:approved 用户查飞书在职状态
+    for open_id in _open_ids_by_status("approved"):
         try:
             status = await fetch_feishu_status(open_id)
         except Exception as e:

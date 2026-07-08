@@ -69,3 +69,7 @@ def mark_denied(open_id: str, by: str):
 
 def mark_disabled(open_id: str, reason: str):
     _set(open_id, status="disabled", disabled_reason=reason, disabled_at=_now())
+
+def mark_disable_failed(open_id: str, reason: str):
+    """离职禁用重试用尽仍失败:留痕供 reconcile 重扫 + 人工排查(安全攸关:绝不漏禁)。"""
+    _set(open_id, status="disable_failed", disable_failed_reason=reason, disable_failed_at=_now())
