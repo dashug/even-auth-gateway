@@ -91,9 +91,12 @@ async def run(client) -> None:
     for open_id in _distinct_open_ids_by_status("disable_failed"):
         logger.info("Reconcile: 重试上次禁用失败的 %s", open_id)
         await offboard.apply(open_id, "", "reconcile-retry", client)
-    # 2) 常规对账:approved 用户查飞书在职状态。同一用户可能对多个 app 都是 approved,
-    # 去重后只查一次飞书、departed 时只 offboard 一次(offboard.apply 本身是按用户禁用的)。
-    for open_id in _distinct_open_ids_by_status("approved"):
+    # 2) 常规对账:检查集 = 本地 approved 用户 ∪ Casdoor 任一 approved-* 组的飞书成员。
+    # #8:直接加进 Casdoor 组、绕过本地审批库的用户(迁移/手工授权)也要被对账,否则永远漏掉。
+    # 去重后每人只查一次飞书、departed 时只 offboard 一次(offboard.apply 按用户禁用)。
+    from even_auth_gov import casdoor_admin
+    check_ids = set(_distinct_open_ids_by_status("approved")) | set(await casdoor_admin.list_approved_feishu_members(client))
+    for open_id in sorted(check_ids):
         try:
             status = await fetch_feishu_status(open_id)
         except FeishuUserNotFound:

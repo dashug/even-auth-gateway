@@ -108,3 +108,20 @@ def test_find_user_by_email_returns_org_name(monkeypatch):
         client = _client(handler)
         assert await ca.find_user_by_email(client, owner="even-test", email="a@e.com") == "even-test/alice"
     asyncio.run(run())
+
+def test_list_approved_feishu_members_filters(monkeypatch):
+    # #8:只收 id 以 ou_ 开头(飞书用户)且在任一 approved-* 组的成员;密码用户/非准入组跳过。
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    def handler(req):
+        if req.url.path == "/api/get-users":
+            return httpx.Response(200, json={"data": [
+                {"id": "ou_a", "groups": ["even-test/approved-cs-hub"]},        # 飞书+准入 → 收
+                {"id": "ou_b", "groups": ["even-test/other"]},                  # 飞书但非准入组 → 不收
+                {"id": "uuid-alice", "groups": ["even-test/approved-cs-hub"]},  # 非飞书(密码)→ 不收
+                {"id": "ou_c", "groups": ["even-test/approved-demo-app"]},      # 另一 app 的准入组 → 收
+            ]})
+        return httpx.Response(404)
+    async def run():
+        async with _client(handler) as c:
+            assert set(await ca.list_approved_feishu_members(c)) == {"ou_a", "ou_c"}
+    asyncio.run(run())

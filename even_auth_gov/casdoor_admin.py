@@ -38,6 +38,28 @@ async def _get_by_open_id(client: httpx.AsyncClient, open_id: str) -> dict | Non
         logger.warning("Casdoor get-user(open_id=%s) error: %s", open_id, e)
         return None
 
+async def list_approved_feishu_members(client: httpx.AsyncClient) -> list[str]:
+    """org 下所有飞书用户(id 以 ou_ 开头)且在任一 approved-* 组的 open_id 列表。
+    #8:补上"直接加进 Casdoor 组(迁移/手工授权)、不在本地审批库"的用户,让 reconcile 也能对账他们。
+    密码用户等非飞书身份跳过(不走飞书在职状态对账)。"""
+    prefix = f"{_org()}/approved-"
+    try:
+        resp = await client.get("/api/get-users", params={"owner": _org(), **_auth()}, timeout=15.0)
+        data = resp.json() if resp.content else {}
+        if resp.status_code != 200 or data.get("status") == "error":
+            logger.warning("Casdoor get-users failed: %s %s", resp.status_code, data)
+            return []
+        users = data.get("data") or []
+    except Exception as e:
+        logger.warning("Casdoor get-users error: %s", e)
+        return []
+    out = []
+    for u in users:
+        oid = u.get("id") or ""
+        if oid.startswith("ou_") and any((g or "").startswith(prefix) for g in (u.get("groups") or [])):
+            out.append(oid)
+    return out
+
 async def _update_user(client: httpx.AsyncClient, casdoor_id: str, user_obj: dict, column: str) -> bool:
     try:
         resp = await client.post("/api/update-user", params={"id": casdoor_id, "columns": column, **_auth()},

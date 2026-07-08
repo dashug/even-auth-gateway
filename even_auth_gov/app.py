@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import os
 from fastapi import FastAPI, Request, Response
-from even_auth_gov import webhook as wh, settings, feishu_ws, scheduler, approval_store
+from even_auth_gov import webhook as wh, settings, feishu_ws, scheduler, approval_store, logging_setup
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() not in ("", "0", "false", "no")
@@ -43,6 +43,7 @@ def _webhook_token(request: Request) -> str:
     return request.headers.get(header, "")
 
 def build_app() -> FastAPI:
+    logging_setup.setup()   # 挂 even_auth_gov 日志(否则审批/离职全静默,见 logging_setup)
     app = FastAPI(title="even-auth-gov", lifespan=_lifespan)
 
     async def _send_card(info: dict):

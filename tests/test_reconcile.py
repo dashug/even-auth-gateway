@@ -65,6 +65,21 @@ def test_reconcile_resends_only_unnotified_pending(monkeypatch, tmp_path):
     assert sent == ["ou_stuck"]                                    # 只补发没送达的
     assert approval_store.get("ou_stuck", "app-a")["notified_at"]           # 补发后留痕
 
+def test_reconcile_includes_casdoor_group_members_not_in_local_store(monkeypatch, tmp_path):
+    # #8:直接加进 Casdoor 组、不在本地审批库的用户(迁移/手工授权)也要被对账。
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    approval_store.mark_pending("ou_local", "app-a", {"name": "L"}); approval_store.mark_approved("ou_local", "app-a", "b")
+    async def fake_members(client): return ["ou_manual", "ou_local"]   # 手工加的 + 与本地重复的
+    monkeypatch.setattr("even_auth_gov.casdoor_admin.list_approved_feishu_members", fake_members)
+    checked, disabled = [], []
+    async def fake_status(open_id): checked.append(open_id); return _status(is_resigned=True)
+    async def fake_apply(open_id, name, reason, client): disabled.append(open_id)
+    monkeypatch.setattr(reconcile, "fetch_feishu_status", fake_status)
+    monkeypatch.setattr(reconcile.offboard, "apply", fake_apply)
+    asyncio.run(reconcile.run(client=None))
+    assert set(checked) == {"ou_local", "ou_manual"}    # 本地 ∪ Casdoor 组,去重
+    assert set(disabled) == {"ou_local", "ou_manual"}   # 都离职 → 都禁用(含只在组里的手工用户)
+
 def test_reconcile_retries_disable_failed(monkeypatch, tmp_path):
     # #4 兜底:上次禁用失败的记录,每日对账优先重试(reason=reconcile-retry)。
     monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
