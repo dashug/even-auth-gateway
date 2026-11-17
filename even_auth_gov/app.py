@@ -58,17 +58,19 @@ def build_app() -> FastAPI:
             return
         from even_auth_gov.feishu import build_sso_approval_card, send_card
         app_name = info.get("app", "") or settings.default_app()
-        owner = settings.approver_for(app_name)
+        owner = info.get("to") or settings.approver_for(app_name)   # to:重发给点击人 / 超时升级对象
         if not owner or owner == "ou_xxx":
             raise RuntimeError(f"应用 {app_name} 未配置审批人(APPROVER_<APP> / APPROVER_FEISHU_ID)")
         # 审批即赋角:该应用在 Casdoor 建了 <app>-<role> 就按角色出批准按钮。读不到清单时降级为
-        # 普通"批准"(只开准入、不给角色,权限上偏保守),不因此卡住审批或拖到次日对账补发。
+        # 普通"批准"按钮,不因此卡住推送或拖到对账补发;真点下去时 decision 会再查一次角色,
+        # 该应用其实分了角色就拒绝并重发带角色按钮的卡片(角色强制)。
         async with ca.make_client() as client:
             roles = await ca.list_app_roles(client, app_name, settings.known_apps())
         if roles is None:
             logger.warning("读取 %s 的角色清单失败,审批卡片不带角色按钮", app_name)
         ok = await send_card(owner, build_sso_approval_card(
-            info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name, roles=roles or []
+            info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name, roles=roles or [],
+            note=info.get("note", ""),
         ))
         if not ok:
             raise RuntimeError(f"飞书 send_card 失败(审批人 {owner}, app={app_name})")

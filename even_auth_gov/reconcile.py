@@ -9,6 +9,7 @@ disable_failed 重试同理去重。待批卡片补发(#12)则相反,是按 (ope
 逐条处理的 —— 一个人可能对 app A 已批、对 app B 还在 pending 补发卡片,互不影响。
 """
 from __future__ import annotations
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -71,15 +72,64 @@ def _pending_needing_card() -> list[dict]:
             out.append(r)
     return out
 
-async def run(client) -> None:
-    # 0) 补发卡住的待审批卡片(#12:发失败/审批人误配 → 不再永久 pending 无人知)。
-    # 每条记录自带 app,按 app 找回其审批人(settings.approver_for)—— 不同 app 可能是不同人。
+def _hours_since(ts: str, now: datetime) -> float | None:
+    try:
+        return (now - datetime.fromisoformat(ts)).total_seconds() / 3600
+    except Exception:
+        return None
+
+def _pending_needing_escalation() -> list[tuple[dict, float]]:
+    """审批人第一次收到卡片后超过 escalate_after_hours 仍待批、还没升级过的记录。
+    从"第一次送达"而不是申请时间算起:卡片之前一直没推送成功的,审批人刚收到就升级不公平;
+    也不能用 notified_at —— 催办会刷新它。老记录没有 first_notified_at 时退回申请时间。"""
+    limit = settings.escalate_after_hours()
+    if limit <= 0:
+        return []
+    out, now = [], datetime.now(timezone.utc)
+    for r in approval_store.all_records().values():
+        if r.get("status") != "pending" or r.get("escalated_at") or not r.get("notified_at"):
+            continue
+        waited = _hours_since(r.get("first_notified_at") or r.get("applied_at") or "", now)
+        if waited is not None and waited > limit:
+            out.append((r, waited))
+    return out
+
+# 每小时的待批扫描与每日对账可能同时触发,串行化以免同一张卡片补发/升级两次。
+_SWEEP_LOCK = asyncio.Lock()
+
+async def sweep_pending() -> None:
+    """待审批的补发、催办、超时升级。调度器每小时跑一次(SSO_PENDING_SWEEP_CRON),每日对账也先跑一次。"""
     from even_auth_gov import webhook
-    for r in _pending_needing_card():
-        open_id = r.get("open_id", "")
-        app = r.get("app") or settings.default_app()
-        if await webhook.notify_pending(open_id, app, r.get("name", ""), r.get("email", "")):
-            logger.info("Reconcile: 补发待审批卡片 %s app=%s", open_id, app)
+    async with _SWEEP_LOCK:
+        # 补发卡住的待审批卡片(#12:发失败/审批人误配 → 不再永久 pending 无人知)。
+        # 每条记录自带 app,按 app 找回其审批人(settings.approver_for)—— 不同 app 可能是不同人。
+        for r in _pending_needing_card():
+            open_id = r.get("open_id", "")
+            app = r.get("app") or settings.default_app()
+            if await webhook.notify_pending(open_id, app, r.get("name", ""), r.get("email", "")):
+                logger.info("Reconcile: 补发待审批卡片 %s app=%s", open_id, app)
+        # 超时升级(里程碑 3 / PRD 风险项"审批人缺位"):卡片另发给升级对象,升级对象和原审批人
+        # 谁先点算谁(decision 按记录上的 escalated_to 放行)。每条申请只升级一次。
+        target = settings.escalate_to()
+        for r, waited in _pending_needing_escalation():
+            open_id = r.get("open_id", "")
+            app = r.get("app") or settings.default_app()
+            if not target or target == "ou_xxx" or target == settings.approver_for(app):
+                continue   # 没配升级对象,或审批人本身就是升级对象:没有更上一级
+            note = f"审批人收到该申请已 {int(waited)} 小时仍未处理,升级给你。你和原审批人谁先处理都算。"
+            try:
+                await webhook.send_approval_card({"open_id": open_id, "name": r.get("name", ""),
+                                                  "email": r.get("email", ""), "app": app,
+                                                  "to": target, "note": note})
+            except Exception as e:
+                logger.warning("超时升级卡片发送失败 %s app=%s → %s: %s(下次扫描重试)", open_id, app, target, e)
+                continue
+            approval_store.mark_escalated(open_id, app, target)
+            logger.info("Reconcile: 待批超时 %.0fh,已升级 %s app=%s → %s", waited, open_id, app, target)
+
+async def run(client) -> None:
+    # 0) 待审批补发/催办/超时升级(调度器另有每小时一次的同一扫描)。
+    await sweep_pending()
     # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
     # 离职是按用户的 —— 同一用户可能在多个 app 记录上都是 disable_failed,去重后只重试一次。
     for open_id in _distinct_open_ids_by_status("disable_failed"):

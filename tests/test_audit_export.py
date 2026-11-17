@@ -58,3 +58,14 @@ def test_export_includes_role_granted_at_approval(monkeypatch, tmp_path):
     by = {(r["open_id"], r["app"]): r for r in _rows(out.getvalue())}
     assert by[("ou_d", "app-a")]["role"] == "app-a-editor"
     assert by[("ou_a", "app-a")]["role"] == ""
+
+
+def test_export_includes_escalation_trail(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    approval_store.mark_pending("ou_a", "app-a", {"name": "甲"})
+    approval_store.mark_escalated("ou_a", "app-a", "ou_esc")
+    approval_store.mark_approved("ou_a", "app-a", "ou_esc")
+    buf = io.StringIO()
+    audit_export.export_csv(buf)
+    row = _rows(buf.getvalue())[0]
+    assert row["escalated_to"] == "ou_esc" and row["escalated_at"] and row["approved_by"] == "ou_esc"

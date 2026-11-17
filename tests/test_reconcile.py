@@ -137,3 +137,89 @@ def test_reconcile_resends_pending_card_per_app_to_its_own_approver(monkeypatch,
     assert set(sent) == {("ou_multi", "app-a"), ("ou_multi", "app-b")}
     assert approval_store.get("ou_multi", "app-a")["notified_at"]
     assert approval_store.get("ou_multi", "app-b")["notified_at"]
+
+
+# ── 超时升级(里程碑 3):待批超过 APPROVAL_ESCALATE_HOURS(默认 24)→ 卡片升级给 APPROVAL_ESCALATE_TO
+#    (默认全局兜底审批人),只升级一次;发送失败不记,下次再试 ──
+from datetime import datetime, timedelta, timezone
+
+def _aged_pending(open_id, app, hours, notified=True):
+    """申请于 hours 小时前提交;notified=True 表示审批人当时就收到了卡片。"""
+    approval_store.mark_pending(open_id, app, {"name": open_id, "email": f"{open_id}@e.com"})
+    then = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    approval_store._set(open_id, app, applied_at=then)
+    if notified:
+        approval_store._set(open_id, app, notified_at=then, first_notified_at=then)
+
+def _escalation_env(monkeypatch, tmp_path, fail=False):
+    from even_auth_gov import webhook
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    monkeypatch.setenv("APPROVER_FEISHU_ID", "ou_root")
+    monkeypatch.setenv("APPROVER_APP_A", "ou_boss")
+    monkeypatch.delenv("APPROVAL_ESCALATE_HOURS", raising=False)
+    monkeypatch.delenv("APPROVAL_ESCALATE_TO", raising=False)
+    sent = []
+    async def fake_send(info):
+        if fail:
+            raise RuntimeError("feishu down")
+        sent.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    return sent
+
+def test_sweep_escalates_stale_pending_once_to_fallback_approver(monkeypatch, tmp_path):
+    sent = _escalation_env(monkeypatch, tmp_path)
+    _aged_pending("ou_old", "app-a", hours=30)
+    asyncio.run(reconcile.sweep_pending())
+    esc = [i for i in sent if i.get("to")]
+    assert len(esc) == 1 and esc[0]["to"] == "ou_root" and esc[0]["open_id"] == "ou_old" and esc[0]["app"] == "app-a"
+    assert "30 小时" in esc[0]["note"]
+    rec = approval_store.get("ou_old", "app-a")
+    assert rec["escalated_to"] == "ou_root" and rec["escalated_at"]
+    sent.clear()
+    asyncio.run(reconcile.sweep_pending())
+    assert not [i for i in sent if i.get("to")]                     # 只升级一次
+
+def test_sweep_does_not_escalate_fresh_unnotified_or_decided(monkeypatch, tmp_path):
+    sent = _escalation_env(monkeypatch, tmp_path)
+    _aged_pending("ou_fresh", "app-a", hours=2)
+    _aged_pending("ou_silent", "app-a", hours=30, notified=False)   # 卡片都没送到审批人:先补发,不升级
+    _aged_pending("ou_done", "app-a", hours=30)
+    approval_store.mark_approved("ou_done", "app-a", "ou_boss")
+    asyncio.run(reconcile.sweep_pending())
+    assert not [i for i in sent if i.get("to")]
+    assert [i["open_id"] for i in sent] == ["ou_silent"]            # 补发照常,发给该应用审批人
+
+def test_sweep_skips_escalation_when_target_is_already_the_approver_or_disabled(monkeypatch, tmp_path):
+    sent = _escalation_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("APPROVER_APP_A", "ou_root")                  # 审批人就是兜底人,没有更上一级
+    _aged_pending("ou_old", "app-a", hours=30)
+    asyncio.run(reconcile.sweep_pending())
+    assert not [i for i in sent if i.get("to")]
+    monkeypatch.setenv("APPROVER_APP_A", "ou_boss")
+    monkeypatch.setenv("APPROVAL_ESCALATE_HOURS", "0")               # 0 = 关闭升级
+    asyncio.run(reconcile.sweep_pending())
+    assert not [i for i in sent if i.get("to")]
+
+def test_sweep_escalation_honours_custom_target_and_hours(monkeypatch, tmp_path):
+    sent = _escalation_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("APPROVAL_ESCALATE_TO", "ou_cto")
+    monkeypatch.setenv("APPROVAL_ESCALATE_HOURS", "4")
+    _aged_pending("ou_old", "app-a", hours=5)
+    asyncio.run(reconcile.sweep_pending())
+    assert [i["to"] for i in sent if i.get("to")] == ["ou_cto"]
+
+def test_sweep_escalation_send_failure_is_retried_next_time(monkeypatch, tmp_path):
+    _escalation_env(monkeypatch, tmp_path, fail=True)
+    _aged_pending("ou_old", "app-a", hours=30)
+    asyncio.run(reconcile.sweep_pending())
+    assert "escalated_to" not in approval_store.get("ou_old", "app-a")
+
+
+def test_sweep_escalation_clock_starts_when_approver_first_got_the_card(monkeypatch, tmp_path):
+    """申请 30 小时前提交,但卡片 2 小时前才第一次送达(之前推送一直失败)→ 还不该升级。"""
+    sent = _escalation_env(monkeypatch, tmp_path)
+    _aged_pending("ou_late", "app-a", hours=30, notified=False)
+    two_h_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    approval_store._set("ou_late", "app-a", notified_at=two_h_ago, first_notified_at=two_h_ago)
+    asyncio.run(reconcile.sweep_pending())
+    assert not [i for i in sent if i.get("to")]

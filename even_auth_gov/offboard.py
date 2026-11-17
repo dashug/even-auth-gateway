@@ -8,7 +8,8 @@
 APP-AWARE(设计评审 #2 #16)但离职本身仍是**按用户**的一次性动作:禁用 Casdoor
 账号 = 该用户对所有应用的登录能力一次性关闭,不需要、也不应该按 app 分别禁用。
 移组同样按用户一次做完:remove_approved_groups 清掉 Casdoor 上该用户所有 approved-* 组
-(以 Casdoor 为准,覆盖本地审批库里没有记录的迁移/手工授权用户)。
+(以 Casdoor 为准,覆盖本地审批库里没有记录的迁移/手工授权用户);随后 remove_roles
+撤掉其全部角色。两者都尽力而为 —— 禁用才是断权,移组/撤角色失败不影响离职结果。
 """
 from __future__ import annotations
 import asyncio
@@ -61,6 +62,12 @@ async def apply(open_id: str, name: str, reason: str, client) -> bool:
                     logger.warning("Offboard 移组失败 %s(已禁用,非致命)", open_id)
             except Exception as e:
                 logger.warning("Offboard 移组失败 %s: %s(已禁用,非致命)", open_id, e)
+            # 角色同理撤干净(全部角色,以 Casdoor 实际成员为准),审计/权限视图里不留离职者的角色。
+            try:
+                if not await ca.remove_roles(client, user_id=open_id):
+                    logger.warning("Offboard 撤角色失败 %s(已禁用,非致命)", open_id)
+            except Exception as e:
+                logger.warning("Offboard 撤角色失败 %s: %s(已禁用,非致命)", open_id, e)
             approval_store.mark_all_disabled(open_id, reason)
             logger.info("Offboard 已禁用 Casdoor: %s (%s) via %s(第 %d 次)", name, open_id, reason, attempt)
             return True

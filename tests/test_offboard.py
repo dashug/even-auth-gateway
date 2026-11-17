@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 from types import SimpleNamespace
 from even_auth_gov import offboard, approval_store
 
@@ -16,8 +17,10 @@ def _setup(monkeypatch, tmp_path, disable_ok=True, app="app-a"):
     calls = []
     async def fake_disable(client, user_id): calls.append(("disable", user_id)); return disable_ok
     async def fake_remove_all(client, user_id): calls.append(("remove_approved", user_id)); return True
+    async def fake_remove_roles(client, user_id, app=None, keep="", known_apps=()): return True
     monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
     monkeypatch.setattr(offboard.ca, "remove_approved_groups", fake_remove_all)
+    monkeypatch.setattr(offboard.ca, "remove_roles", fake_remove_roles)
     return calls
 
 def test_flag_helper():
@@ -138,3 +141,27 @@ def test_apply_removes_casdoor_approved_groups_even_without_local_record(monkeyp
     ok = asyncio.run(offboard.apply("ou_migrated", "老用户", "reconcile", client=None))
     assert ok is True
     assert ("remove_approved", "ou_migrated") in calls
+
+
+def test_apply_removes_all_casdoor_roles_after_groups(monkeypatch, tmp_path):
+    """离职也撤掉该用户在 Casdoor 里的全部角色:账号虽已禁用,但不留"谁有什么角色"的残余。"""
+    calls = _setup(monkeypatch, tmp_path)
+    async def fake_remove_roles(client, user_id, app=None, keep="", known_apps=()):
+        calls.append(("remove_roles", user_id, app)); return True
+    monkeypatch.setattr(offboard.ca, "remove_roles", fake_remove_roles)
+    assert asyncio.run(offboard.apply("ou_l", "离职者", "offboard_event", client=None)) is True
+    assert calls == [("disable", "ou_l"), ("remove_approved", "ou_l"), ("remove_roles", "ou_l", None)]
+
+@pytest.mark.parametrize("behaviour", ["raise", "false"])
+def test_apply_role_removal_failure_is_non_fatal(monkeypatch, tmp_path, behaviour):
+    """撤角色和移组一样尽力而为:禁用才是断权,撤角色失败不影响禁用结果与记录。"""
+    calls = _setup(monkeypatch, tmp_path)
+    async def bad_remove_roles(client, user_id, app=None, keep="", known_apps=()):
+        calls.append(("remove_roles", user_id))
+        if behaviour == "raise":
+            raise RuntimeError("casdoor down")
+        return False
+    monkeypatch.setattr(offboard.ca, "remove_roles", bad_remove_roles)
+    assert asyncio.run(offboard.apply("ou_l", "离职者", "offboard_event", client=None)) is True
+    assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
+    assert ("remove_roles", "ou_l") in calls

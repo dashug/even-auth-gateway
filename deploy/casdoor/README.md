@@ -112,14 +112,25 @@ curl -s http://127.0.0.1:8100/healthz        # {"status":"ok","feishu_ws":true,"
 
 - **Casdoor webhook**：后台 Webhooks → URL `http://even-auth-gov:8080/casdoor/webhook`（compose 内网），事件勾 `signup`，自定义头 `X-Webhook-Token: <CASDOOR_WEBHOOK_SECRET>`，勾 `isUserExtended`。
 - **接入应用调 `/request-access`**：应用把用户刚登录拿到的 id_token 交给网关，网关验 Casdoor 签名——应用不持有任何网关密钥。每接一个应用，在 `gov.env` 的 `APP_CLIENT_IDS` 加 `<应用短名>:<clientId>`；`CASDOOR_ISSUER` 填 Casdoor 对外地址（token 里的 `iss`，和内网 `http://casdoor:8000` 不同）。经 nginx 把 `8100` 反代给内网应用（与 Casdoor 同样只做 TLS 前置，不对公网开放）。契约见 `docs/integration-guide.md`「待审批」。
-- **审批时分配角色**：在 Casdoor 给应用建 `<应用短名>-<role>` 角色（显示名填中文），审批卡片自动按角色出按钮，无需改网关配置。
+- **审批时分配角色**：在 Casdoor 给应用建 `<应用短名>-<role>` 角色（显示名填中文），审批卡片自动按角色出按钮，无需改网关配置。批准时该应用只留所选角色；拒绝撤该应用角色、离职撤全部角色。建了角色的应用不允许无角色批准（角色强制）。
+- **定时任务**：每天 `SSO_RECONCILE_CRON`（默认 08:00）对账，跑完做权限核对、高/中级异常推给 `APPROVER_FEISHU_ID`；每小时 `SSO_PENDING_SWEEP_CRON` 扫一遍待批——补发没送达的卡片、催办、超时升级（`APPROVAL_ESCALATE_HOURS` / `APPROVAL_ESCALATE_TO`）。
 - **飞书应用必须与 Casdoor Lark provider 同一个**：open_id 按飞书应用区分，否则审批卡片/在职查询拿到的 open_id 对不上 Casdoor 的 `sub`。
+- **飞书开放平台配置**（网关用到的全部飞书能力，权限名以后台添加事件/接口时的提示为准）：
+  - 启用**机器人**能力：审批卡片、审批结果、离职禁用失败告警都以应用身份发消息（`im.v1.message.create`）。
+  - **事件与回调 → 订阅方式选"使用长连接接收"**（网关只走 WS，不开 HTTP 回调地址）。事件：`contact.user.deleted_v3`（员工删除/离职）、`contact.user.updated_v3`（冻结/离职状态变化）；回调：`card.action.trigger`（审批卡片按钮）。
+  - **通讯录读取**：每日对账按 open_id 查在职状态（`contact.v3.user.get`）。**通讯录权限范围必须覆盖全员**——范围外的人离职收不到事件，对账查询因无权限会被当作瞬时错误跳过（fail-open，不会禁用），等于漏禁。
+  - 改完权限/事件要**发布新版本**才生效。
 - **运维命令**（在容器里跑，读写的是同一份审批库）：
   ```bash
   # 审计导出(F-5.8.2)
   docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec -T even-auth-gov \
     python -m even_auth_gov.audit_export > audit.csv
-  # CS Hub 老操作员迁移(先 --dry-run 看匹配,再真跑)
+  # 权限视图 / 离职撤权核对(F-5.8.3)
+  docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec -T even-auth-gov \
+    python -m even_auth_gov.access_report > access.csv
+  docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec -T even-auth-gov \
+    python -m even_auth_gov.access_report --anomalies --check-feishu > check.csv
+  # CS Hub 老操作员迁移(先 --dry-run 看匹配,再真跑;cs-hub 分了角色就加 --role cs-hub-<角色>)
   docker compose -f deploy/casdoor/docker-compose.yml --profile gov cp admin_auth.json even-auth-gov:/tmp/
   docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec even-auth-gov \
     python -m even_auth_gov.migrate_emails /tmp/admin_auth.json --dry-run

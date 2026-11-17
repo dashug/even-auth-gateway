@@ -80,7 +80,14 @@ async def _process_card(data) -> None:
             client=client,
             role=value.get("role") or "",   # 审批即赋角:"批准为「X」"按钮带角色名;老卡片/无角色应用没有
         )
-    await _notify_decision(operator_id, applicant, app, result or {})
+    result = dict(result or {})
+    if result.get("resend_card") and applicant:
+        # 角色强制:点的是不带角色的卡片,而该应用分了角色 → 给点击人补一张带角色按钮的卡片。
+        from even_auth_gov import webhook, approval_store
+        rec = approval_store.get(applicant, app) or {}
+        if not await webhook.notify_pending(applicant, app, rec.get("name", ""), rec.get("email", ""), to=operator_id):
+            result["message"] = f"{app} 已分角色,批准时必须选择角色,未批准。重发带角色的卡片失败,请稍后再点一次"
+    await _notify_decision(operator_id, applicant, app, result)
 
 
 async def _notify_decision(operator_id: str, applicant: str, app: str, result: dict) -> None:

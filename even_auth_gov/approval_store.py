@@ -104,8 +104,15 @@ def mark_pending(open_id: str, app: str, profile: dict) -> bool:
     return True
 
 def mark_notified(open_id: str, app: str):
-    """审批卡片已成功送达时留痕;reconcile 据此判断是否需要补发(#12)。"""
-    _set(open_id, app, notified_at=_now())
+    """审批卡片已成功送达时留痕;reconcile 据此判断是否需要补发(#12)。
+    notified_at 每次送达(含催办)都刷新;first_notified_at 只记第一次 —— 超时升级从它算起。"""
+    with _mutate() as recs:
+        key = _key(open_id, app)
+        rec = recs.get(key, {"open_id": open_id, "app": app})
+        now = _now()
+        rec["notified_at"] = now
+        rec.setdefault("first_notified_at", now)
+        recs[key] = rec
 
 def mark_approved(open_id: str, app: str, by: str, role: str = ""):
     """role:审批时一并分配的 Casdoor 角色名(F-5.5.3),留痕供审计导出;未分配则不写该字段。"""
@@ -113,6 +120,11 @@ def mark_approved(open_id: str, app: str, by: str, role: str = ""):
     if role:
         fields["role"] = role
     _set(open_id, app, **fields)
+
+def mark_escalated(open_id: str, app: str, to: str):
+    """待批超时、卡片已升级给 to(飞书 open_id)。to 从此也能处理这条申请(decision 据此放行);
+    重新申请(denied → pending)会建新记录,升级记录随之清零。"""
+    _set(open_id, app, escalated_to=to, escalated_at=_now())
 
 def mark_denied(open_id: str, app: str, by: str):
     _set(open_id, app, status="denied", denied_by=by, denied_at=_now())

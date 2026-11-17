@@ -246,3 +246,78 @@ def test_assign_role_unknown_user_or_role_or_update_failure_is_false(monkeypatch
     assert asyncio.run(ca.assign_role(_client(_roles_handler({}, roles, user=None)), OPEN_ID, "demo-app-viewer")) is False
     assert asyncio.run(ca.assign_role(_client(_roles_handler({}, roles, user=_user_obj())), OPEN_ID, "demo-app-nope")) is False
     assert asyncio.run(ca.assign_role(_client(_roles_handler({}, roles, user=_user_obj(), update_ok=False)), OPEN_ID, "demo-app-viewer")) is False
+
+# ── 撤角色:审批"只留所选角色" / 拒绝撤该应用角色 / 离职撤全部角色。以 Casdoor 实际成员为准 ──
+
+ME = "even-test/randname"
+
+def _mutable_roles_handler(roles, user=None, list_ok=True, fail_update=()):
+    """roles 按名字可变;记录每次 update-role 的 (角色名, users)。"""
+    by_name = {r["name"]: r for r in roles}
+    updates = []
+    def handler(req):
+        p = req.url.path
+        if p == "/api/get-user":
+            return httpx.Response(200, json={"status": "ok", "data": user})
+        if p == "/api/get-roles":
+            if not list_ok:
+                return httpx.Response(200, json={"status": "error", "msg": "boom", "data": None})
+            return httpx.Response(200, json={"status": "ok", "data": list(by_name.values())})
+        name = req.url.params.get("id", "/").split("/", 1)[1]
+        if p == "/api/get-role":
+            return httpx.Response(200, json={"status": "ok", "data": by_name.get(name)})
+        if p == "/api/update-role":
+            body = json.loads(req.content)
+            if name in fail_update:
+                return httpx.Response(200, json={"status": "error", "msg": "nope", "data": None})
+            updates.append((name, body["users"]))
+            by_name[name] = body
+            return httpx.Response(200, json={"status": "ok", "data": "Affected"})
+        return httpx.Response(404)
+    return handler, updates
+
+def test_remove_roles_for_app_keeps_chosen_and_drops_other_app_roles(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    roles = [_role("app-a-viewer", users=[ME, "even-test/bob"]), _role("app-a-editor", users=[ME]),
+             _role("app-a-off", users=[ME], enabled=False), _role("other-viewer", users=[ME])]
+    h, updates = _mutable_roles_handler(roles, user=_user_obj())
+    ok = asyncio.run(ca.remove_roles(_client(h), OPEN_ID, app="app-a", keep="app-a-editor"))
+    assert ok is True
+    # 该应用的其它角色(含已停用的)都撤;所选角色与别的应用的角色不动;别人不受影响
+    assert sorted(updates) == [("app-a-off", []), ("app-a-viewer", ["even-test/bob"])]
+
+def test_remove_roles_without_app_drops_every_role_the_user_holds(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    roles = [_role("app-a-viewer", users=[ME]), _role("other-admin", users=["even-test/bob", ME]),
+             _role("app-b-x", users=["even-test/bob"])]
+    h, updates = _mutable_roles_handler(roles, user=_user_obj())
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID)) is True
+    assert sorted(updates) == [("app-a-viewer", []), ("other-admin", ["even-test/bob"])]
+
+def test_remove_roles_skips_longer_sibling_app(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    roles = [_role("cs-admin", users=[ME]), _role("cs-hub-operator", users=[ME])]
+    h, updates = _mutable_roles_handler(roles, user=_user_obj())
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID, app="cs", known_apps={"cs", "cs-hub"})) is True
+    assert updates == [("cs-admin", [])]
+
+def test_remove_roles_noop_when_user_holds_none(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    h, updates = _mutable_roles_handler([_role("app-a-viewer", users=["even-test/bob"])], user=_user_obj())
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID, app="app-a")) is True
+    assert updates == []
+
+def test_remove_roles_partial_failure_is_false_but_rest_still_removed(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    roles = [_role("app-a-viewer", users=[ME]), _role("app-a-editor", users=[ME])]
+    h, updates = _mutable_roles_handler(roles, user=_user_obj(), fail_update={"app-a-editor"})
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID, app="app-a")) is False
+    assert updates == [("app-a-viewer", [])]
+
+def test_remove_roles_unknown_user_or_list_error_is_false(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    h, _ = _mutable_roles_handler([_role("app-a-viewer", users=[ME])], user=None)
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID, app="app-a")) is False
+    h, updates = _mutable_roles_handler([_role("app-a-viewer", users=[ME])], user=_user_obj(), list_ok=False)
+    assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID)) is False
+    assert updates == []

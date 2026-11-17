@@ -12,7 +12,7 @@
 
 1. **Applications → 新建你的应用**，拿到 `clientId` / `clientSecret`，Redirect URLs 填 `https://<你的应用>/callback`（逐字一致）。
 2. **Groups → 建准入组** `approved-<你的应用短名>`（例：`approved-demo-app`）。
-3.（要角色权限才做）**Roles → 建角色** `<应用短名>-<role>`（例：`demo-app-viewer`），**显示名填审批人看得懂的中文**（如"查看者"）。建好后审批卡片自动按角色出"批准为「查看者」"这类按钮，审批人点哪个就分配哪个角色；不建角色的应用，卡片只有"批准 / 拒绝"。
+3.（要角色权限才做）**Roles → 建角色** `<应用短名>-<role>`（例：`demo-app-viewer`），**显示名填审批人看得懂的中文**（如"查看者"）。建好后审批卡片自动按角色出"批准为「查看者」"这类按钮，审批人点哪个就分配哪个角色（该应用只保留这一个，其它 `<应用短名>-*` 角色会被撤掉）；被拒或离职时角色由网关撤回。**一旦建了角色，就不能"只批准不给角色"**：网关会拒绝不带角色的批准，你的应用也要拒绝没有角色的用户（见检查清单）；想要"普通成员"这一档，就建一个对应的角色（如 `demo-app-member`）。不建角色的应用，卡片只有"批准 / 拒绝"。
 4. **⚠️ 安全必做：裁 id_token 字段**——Casdoor 默认 `tokenFormat=JWT` 会把整个用户对象塞进 id_token（含 `passwordSalt` 等，实测泄露）。**关键：光设 tokenFields 不够，必须同时把 `tokenFormat` 改成 `JWT-Custom`**，白名单才生效。API 做法：
    ```
    POST <CASDOOR>/api/update-application?id=admin/<你的应用>
@@ -131,6 +131,7 @@ Content-Type: application/json
 
 - [ ] Casdoor 注册应用（client_id/secret + 回调 URL 逐字一致）
 - [ ] 建 `approved-<应用>` 组（+ 可选角色，显示名填中文）
+- [ ] 分了角色的应用：**没有本应用角色的用户一律拒绝**（demo 设 `REQUIRE_ROLE=1`）。网关审批时已强制选角色，这是兜底——迁移或后台手工授权的人可能只有准入组
 - [ ] 管理员把 `<应用短名>:<clientId>` 加进网关 `APP_CLIENT_IDS`
 - [ ] **裁 id_token 敏感字段**
 - [ ] 抄 demo_app.py 的 `/login` + `/callback`，改 4 个环境变量

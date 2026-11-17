@@ -46,11 +46,18 @@ async def send_approval_card(info: dict) -> None:  # pragma: no cover - overridd
     raise NotImplementedError
 
 
-async def notify_pending(open_id: str, app: str, name: str = "", email: str = "") -> bool:
+async def notify_pending(open_id: str, app: str, name: str = "", email: str = "", to: str = "",
+                         note: str = "") -> bool:
     """推审批卡片,送达才记 notified_at;失败只记日志、返回 False —— pending 已落库,
-    reconcile 会按 notified_at 为空补发(#12)。webhook / /request-access / reconcile 共用。"""
+    reconcile 会按 notified_at 为空补发(#12)。webhook / /request-access / reconcile / 卡片重发共用。
+    to:指定收卡人(默认该应用的审批人);note:卡片顶部的一行说明。"""
+    info = {"open_id": open_id, "name": name, "email": email, "app": app}
+    if to:
+        info["to"] = to
+    if note:
+        info["note"] = note
     try:
-        await send_approval_card({"open_id": open_id, "name": name, "email": email, "app": app})
+        await send_approval_card(info)
     except Exception as e:
         logger.warning("审批卡片推送失败 %s app=%s: %s(pending 已建,对账会补发)", open_id, app, e)
         return False

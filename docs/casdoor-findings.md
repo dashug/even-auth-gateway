@@ -102,7 +102,20 @@
   - 列表：`GET /api/get-roles?owner=<org>` → `[{name, displayName, users, isEnabled, ...}]`。
   - 单个：`GET /api/get-role?id=<org>/<role>`，不存在时 `status=ok, data=null`。
   - 加人：`POST /api/update-role?id=<org>/<role>` 整对象回写，`users` 元素是 **`<owner>/<name>`**（Casdoor 用户名，不是 open_id）。改完重新换的 token 里 `roles` 即带上该角色。
-  - ⟹ `casdoor_admin.list_app_roles` / `assign_role` 按此实现，与组变更共用进程内锁（role 对象同样是整对象读-改-写）。
+  - 移人：同一个 `update-role`，从 `users` 里去掉 `<owner>/<name>` 后整对象回写（`remove_roles` 已对活实例验证，见 §8）。
+  - ⟹ `casdoor_admin.list_app_roles` / `assign_role` / `remove_roles` 按此实现，与组变更共用进程内锁（role 对象同样是整对象读-改-写）。`remove_roles` 以 `get-roles` 里各角色的 `users` 为准找出该用户所在角色。
 - **签名有效 ≠ 人还在职**：id_token 默认 168h，禁用账号后旧 token 照样验签通过。
   - ⟹ `/request-access` 验签后再 `get-user` 查实时状态：`isForbidden` → 403，查不到 → 503；“已有准入”也按实时 groups 判断。实测：先换 token 再禁用 → 403、不建申请。
 - **端到端**（真实代码，仅把飞书发送换成捕获）：真实 id_token → `/request-access` 建 pending（姓名取自 claim，body 冒填被忽略）→ 卡片按角色出"批准为「编辑者」/「查看者」…"→ 模拟审批人点"编辑者"→ 先 `update-role` 再加 `approved-demo-app` 组 → 新 token `groups=["even-test/approved-demo-app"]`、`roles=[demo-app-editor]`；已准入用户再上报返回 `approved`。
+
+## 8. 里程碑 3 + 撤角色端到端（2026-11-17，同一镜像的临时实例）
+
+真实代码对活 Casdoor，只把飞书发送换成捕获，18 项全过：
+
+- **只留所选角色**：先手工给 alice 挂上查看者 + 编辑者，再"批准为「编辑者」"→ 查看者被撤；新 token `roles=[demo-app-editor]`、`groups=[even-test/approved-demo-app]`。
+- **角色强制**：分了角色的应用点不带角色的批准 → 拒绝 + `resend_card`，没开准入、仍待批。
+- **拒绝撤角色**：有残留查看者的申请人被拒 → 角色被撤。
+- **离职**：带角色批准后离职 → `isForbidden=true`、`approved-*` 组清空、角色成员里没有他。
+- **迁移 `--role`**：不存在的角色 → 整批中止、一个人都不动；正确角色 → 有准入组 + 角色。
+- **权限核对**：造出的 4 类需处理异常（本地离职但 Casdoor 启用 / 停用仍挂组 / 有准入没角色 / 有角色没准入）和 2 条 info 全部核出，正常用户无误报；`get-users` 的 `groups`、`get-roles` 的 `users`（`<owner>/<name>`）形状与单测假设一致；CLI 输出与函数一致；每日推送文本如预期。
+
