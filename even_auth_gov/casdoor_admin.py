@@ -52,21 +52,25 @@ def approved_group(app: str) -> str:
     """该应用的准入组(org 限定),即 id_token / 用户 groups 里出现的形式:<org>/approved-<app>。"""
     return _qualified(f"approved-{app}")
 
-async def list_approved_feishu_members(client: httpx.AsyncClient) -> list[str]:
-    """org 下所有飞书用户(id 以 ou_ 开头)且在任一 approved-* 组的 open_id 列表。
-    #8:补上"直接加进 Casdoor 组(迁移/手工授权)、不在本地审批库"的用户,让 reconcile 也能对账他们。
-    密码用户等非飞书身份跳过(不走飞书在职状态对账)。"""
-    prefix = f"{_org()}/approved-"
+async def list_users(client: httpx.AsyncClient) -> list[dict] | None:
+    """org 下全部用户对象(含 id / groups / isForbidden);出错返回 None(与"确实没人"的 [] 区分)。"""
     try:
         resp = await client.get("/api/get-users", params={"owner": _org(), **_auth()}, timeout=15.0)
         data = resp.json() if resp.content else {}
-        if resp.status_code != 200 or data.get("status") == "error":
+        if resp.status_code != 200 or not isinstance(data, dict) or data.get("status") == "error":
             logger.warning("Casdoor get-users failed: %s %s", resp.status_code, data)
-            return []
-        users = data.get("data") or []
+            return None
+        return [u for u in (data.get("data") or []) if u]
     except Exception as e:
         logger.warning("Casdoor get-users error: %s", e)
-        return []
+        return None
+
+async def list_approved_feishu_members(client: httpx.AsyncClient) -> list[str]:
+    """org 下所有飞书用户(id 以 ou_ 开头)且在任一 approved-* 组的 open_id 列表。
+    #8:补上"直接加进 Casdoor 组(迁移/手工授权)、不在本地审批库"的用户,让 reconcile 也能对账他们。
+    密码用户等非飞书身份跳过(不走飞书在职状态对账)。读不到 Casdoor 时返回 [](对账照常查本地记录)。"""
+    prefix = f"{_org()}/approved-"
+    users = await list_users(client) or []
     out = []
     for u in users:
         oid = u.get("id") or ""
@@ -130,62 +134,97 @@ async def remove_approved_groups(client: httpx.AsyncClient, user_id: str) -> boo
         u["groups"] = kept
         return await _update_user(client, _casdoor_id(u), u, "groups")
 
-async def list_app_roles(client: httpx.AsyncClient, app: str, known_apps=()) -> list[dict] | None:
-    """该应用在 Casdoor 里建好的角色(命名约定 `<app>-<role>`,见 integration-guide 第一步.3)。
-    返回 [{"name": 角色名, "display": 给审批人看的名字}](按 name 排序);已停用的跳过。
-    known_apps:名字以 `<app>-` 开头的其它应用(如 app `cs` 之于 `cs-hub`),它们的角色不算本应用的。
-    出错返回 None(和"确实没建角色"的 [] 区分开)。"""
+def _is_app_role(name: str, app: str, known_apps=()) -> bool:
+    """name 是否属于该应用(`<app>-<role>`)。known_apps 里名字以 `<app>-` 开头的其它应用
+    (如 app `cs` 之于 `cs-hub`)的角色不算本应用的。"""
     prefix = f"{app}-"
-    siblings = [f"{a}-" for a in known_apps if a != app and a.startswith(prefix)]
+    if not name.startswith(prefix):
+        return False
+    return not any(name.startswith(f"{a}-") for a in known_apps if a != app and a.startswith(prefix))
+
+async def list_roles(client: httpx.AsyncClient) -> list[dict] | None:
+    """org 下全部角色(含 users 成员列表);出错返回 None。"""
     try:
         resp = await client.get("/api/get-roles", params={"owner": _org(), **_auth()}, timeout=10.0)
         data = resp.json() if resp.content else {}
         if resp.status_code != 200 or not isinstance(data, dict) or data.get("status") == "error":
             logger.warning("Casdoor get-roles failed: %s %s", resp.status_code, data)
             return None
-        roles = data.get("data") or []
+        return [r for r in (data.get("data") or []) if r]
     except Exception as e:
         logger.warning("Casdoor get-roles error: %s", e)
         return None
-    out = []
-    for r in roles:
-        name = (r or {}).get("name") or ""
-        if not name.startswith(prefix) or any(name.startswith(s) for s in siblings):
-            continue
-        if r.get("isEnabled") is False:
-            continue
-        out.append({"name": name, "display": r.get("displayName") or name[len(prefix):]})
+
+async def _set_role_member(client: httpx.AsyncClient, role: str, member: str, present: bool) -> bool:
+    """把 member(<owner>/<name>)加进 / 移出 <org>/<role> 的 users。已是目标状态则不写。
+    调用方须持 _GROUP_LOCK:角色对象是整对象读-改-写。"""
+    role_id = f"{_org()}/{role}"
+    try:
+        resp = await client.get("/api/get-role", params={"id": role_id, **_auth()}, timeout=10.0)
+        data = resp.json() if resp.content else {}
+        obj = data.get("data") if resp.status_code == 200 and data.get("status") != "error" else None
+        if not obj:
+            logger.warning("Casdoor get-role %s 不存在或失败: %s %s", role_id, resp.status_code, data)
+            return False
+        users = list(obj.get("users") or [])
+        if (member in users) == present:
+            return True
+        obj["users"] = users + [member] if present else [x for x in users if x != member]
+        resp = await client.post("/api/update-role", params={"id": role_id, **_auth()}, json=obj, timeout=10.0)
+        data = resp.json() if resp.content else {}
+        if resp.status_code == 200 and data.get("status") != "error":
+            logger.info("Casdoor 角色%s %s %s", "加入" if present else "移出", role_id, member)
+            return True
+        logger.warning("Casdoor update-role %s failed: %s %s", role_id, resp.status_code, data)
+        return False
+    except Exception as e:
+        logger.warning("Casdoor update-role %s (%s %s) error: %s", role_id, "add" if present else "remove", member, e)
+        return False
+
+async def list_app_roles(client: httpx.AsyncClient, app: str, known_apps=()) -> list[dict] | None:
+    """该应用在 Casdoor 里建好的角色(命名约定 `<app>-<role>`,见 integration-guide 第一步.3)。
+    返回 [{"name": 角色名, "display": 给审批人看的名字}](按 name 排序);已停用的跳过。
+    出错返回 None(和"确实没建角色"的 [] 区分开)。"""
+    roles = await list_roles(client)
+    if roles is None:
+        return None
+    prefix = f"{app}-"
+    out = [{"name": r["name"], "display": r.get("displayName") or r["name"][len(prefix):]}
+           for r in roles
+           if _is_app_role(r.get("name") or "", app, known_apps) and r.get("isEnabled") is not False]
     return sorted(out, key=lambda x: x["name"])
 
 async def assign_role(client: httpx.AsyncClient, user_id: str, role: str) -> bool:
     """user_id = 飞书 open_id。把用户加进 <org>/<role> 的 users(元素是 <owner>/<name>);已在则 no-op。
     角色对象整体读-改-写,与组变更共用 _GROUP_LOCK。"""
-    role_id = f"{_org()}/{role}"
+    async with _GROUP_LOCK:
+        u = await _get_by_open_id(client, user_id)
+        if u is None:
+            return False
+        return await _set_role_member(client, role, _casdoor_id(u), present=True)
+
+async def remove_roles(client: httpx.AsyncClient, user_id: str, app: str | None = None, keep: str = "",
+                       known_apps=()) -> bool:
+    """user_id = 飞书 open_id。把用户移出角色,以 Casdoor 里的实际成员为准(迁移/后台手工加的也算)。
+    - app=None:org 下该用户所在的**全部**角色(离职用);
+    - 给了 app:只动该应用的 `<app>-*` 角色(含已停用的),`keep` 指定的那个保留
+      (审批"批准为「X」"= 该应用只留 X;拒绝 = keep 为空,该应用角色全撤)。
+    都移成功或本来就不在 → True;任一失败 → False(其余照做)。"""
     async with _GROUP_LOCK:
         u = await _get_by_open_id(client, user_id)
         if u is None:
             return False
         member = _casdoor_id(u)
-        try:
-            resp = await client.get("/api/get-role", params={"id": role_id, **_auth()}, timeout=10.0)
-            data = resp.json() if resp.content else {}
-            obj = data.get("data") if resp.status_code == 200 and data.get("status") != "error" else None
-            if not obj:
-                logger.warning("Casdoor get-role %s 不存在或失败: %s %s", role_id, resp.status_code, data)
-                return False
-            users = list(obj.get("users") or [])
-            if member in users:
-                return True
-            obj["users"] = users + [member]
-            resp = await client.post("/api/update-role", params={"id": role_id, **_auth()}, json=obj, timeout=10.0)
-            data = resp.json() if resp.content else {}
-            if resp.status_code == 200 and data.get("status") != "error":
-                return True
-            logger.warning("Casdoor update-role %s failed: %s %s", role_id, resp.status_code, data)
+        roles = await list_roles(client)
+        if roles is None:
             return False
-        except Exception as e:
-            logger.warning("Casdoor assign_role %s → %s error: %s", user_id, role_id, e)
-            return False
+        targets = [r["name"] for r in roles
+                   if r.get("name") and r["name"] != keep and member in (r.get("users") or [])
+                   and (app is None or _is_app_role(r["name"], app, known_apps))]
+        ok = True
+        for name in targets:
+            ok = await _set_role_member(client, name, member, present=False) and ok
+        return ok
 
 async def disable_user(client: httpx.AsyncClient, user_id: str) -> bool:
     u = await _get_by_open_id(client, user_id)

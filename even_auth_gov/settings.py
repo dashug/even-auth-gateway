@@ -20,6 +20,19 @@ def approver_for(app: str) -> str:
     return os.getenv(env_name, "") or approver_feishu_id()
 
 
+def escalate_after_hours() -> float:
+    """待批多少小时没人处理就升级(APPROVAL_ESCALATE_HOURS,默认 24;<=0 关闭)。从申请时间起算。"""
+    try:
+        return float(os.getenv("APPROVAL_ESCALATE_HOURS", "24"))
+    except ValueError:
+        return 24.0
+
+
+def escalate_to() -> str:
+    """超时升级给谁(APPROVAL_ESCALATE_TO,飞书 open_id);未配则用全局兜底审批人 APPROVER_FEISHU_ID。"""
+    return os.getenv("APPROVAL_ESCALATE_TO", "") or approver_feishu_id()
+
+
 def app_clients() -> dict[str, str]:
     """登记可以调 /request-access 的接入应用:APP_CLIENT_IDS="cs-hub:<client_id>,finance:<client_id>"
     → {client_id: app}。id_token 的 aud(= 该应用在 Casdoor 的 client_id)据此映射到应用名;

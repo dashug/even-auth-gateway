@@ -124,3 +124,18 @@ def test_card_shows_display_name_not_random_casdoor_name(monkeypatch, tmp_path):
     asyncio.run(webhook.handle(body, token="shh"))
     assert sent[0]["name"] == "张三"
     assert approval_store.get("ou_n", "app-a")["name"] == "张三"
+
+
+def test_notify_pending_passes_recipient_and_note_through(monkeypatch, tmp_path):
+    """重发/升级时指定收卡人(to)和卡片说明(note);不指定时不带这两个键,由 _send_card 按应用找审批人。"""
+    import asyncio
+    from even_auth_gov import webhook, approval_store
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    approval_store.mark_pending("ou_a", "app-a", {"name": "A"})
+    seen = []
+    async def fake_send(info): seen.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    assert asyncio.run(webhook.notify_pending("ou_a", "app-a", "A", "", to="ou_esc", note="升级")) is True
+    assert asyncio.run(webhook.notify_pending("ou_a", "app-a", "A")) is True
+    assert seen[0]["to"] == "ou_esc" and seen[0]["note"] == "升级"
+    assert "to" not in seen[1] and "note" not in seen[1]

@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 from even_auth_gov import decision, approval_store
 
 def _setup(monkeypatch, tmp_path, app="app-a"):
@@ -8,9 +9,13 @@ def _setup(monkeypatch, tmp_path, app="app-a"):
     async def fake_add(client, user_id, group): calls.append(("add", user_id, group)); return True
     async def fake_remove(client, user_id, group): calls.append(("remove", user_id, group)); return True
     async def fake_disable(client, user_id): calls.append(("disable", user_id)); return True
+    async def no_roles(client, app, known_apps=()): return []   # 默认:该应用没分角色
+    async def fake_remove_roles(client, user_id, app=None, keep="", known_apps=()): return True
     monkeypatch.setattr(decision.ca, "add_to_group", fake_add)
     monkeypatch.setattr(decision.ca, "remove_from_group", fake_remove)
     monkeypatch.setattr(decision.ca, "disable_user", fake_disable)
+    monkeypatch.setattr(decision.ca, "list_app_roles", no_roles)
+    monkeypatch.setattr(decision.ca, "remove_roles", fake_remove_roles)
     return calls
 
 def test_approve_by_owner_adds_to_group(monkeypatch, tmp_path):
@@ -64,7 +69,9 @@ def test_approve_one_app_does_not_touch_other_app_group_or_status(monkeypatch, t
     approval_store.mark_approved("ou_multi", "app-b", "ou_boss")
     calls = []
     async def fake_add(client, user_id, group): calls.append(("add", user_id, group)); return True
+    async def no_roles(client, app, known_apps=()): return []
     monkeypatch.setattr(decision.ca, "add_to_group", fake_add)
+    monkeypatch.setattr(decision.ca, "list_app_roles", no_roles)
     r = asyncio.run(decision.handle("sso_approve", operator_id="ou_boss", owner="ou_boss", sso_open_id="ou_multi", app="app-a", client=None))
     assert r["status"] == "ok"
     assert calls == [("add", "ou_multi", "approved-app-a")]   # app-b 的组从未被碰
@@ -115,12 +122,19 @@ def test_unknown_action_is_rejected_not_treated_as_deny(monkeypatch, tmp_path):
 
 ROLES = [{"name": "app-a-viewer", "display": "查看者"}, {"name": "app-a-editor", "display": "编辑者"}]
 
-def _setup_roles(monkeypatch, tmp_path, roles=ROLES, assign_ok=True):
+def _setup_roles(monkeypatch, tmp_path, roles=ROLES, assign_ok=True, cleanup=True):
+    """cleanup: remove_roles 的返回值(True/False),或 "raise" = 抛异常。"""
     calls = _setup(monkeypatch, tmp_path)
     async def fake_list(client, app, known_apps=()): calls.append(("list", app)); return roles
     async def fake_assign(client, user_id, role): calls.append(("assign", user_id, role)); return assign_ok
+    async def fake_remove_roles(client, user_id, app=None, keep="", known_apps=()):
+        calls.append(("remove_roles", user_id, app, keep))
+        if cleanup == "raise":
+            raise RuntimeError("casdoor down")
+        return cleanup
     monkeypatch.setattr(decision.ca, "list_app_roles", fake_list)
     monkeypatch.setattr(decision.ca, "assign_role", fake_assign)
+    monkeypatch.setattr(decision.ca, "remove_roles", fake_remove_roles)
     return calls
 
 def _approve(role):
@@ -159,9 +173,82 @@ def test_role_list_unavailable_rejects_with_retry(monkeypatch, tmp_path):
     assert not any(c[0] in ("assign", "add") for c in calls)
     assert approval_store.get("ou_a", "app-a")["status"] == "pending"
 
-def test_approve_without_role_does_not_touch_roles(monkeypatch, tmp_path):
-    calls = _setup_roles(monkeypatch, tmp_path)
+def test_approve_without_role_on_app_without_roles_does_not_touch_roles(monkeypatch, tmp_path):
+    calls = _setup_roles(monkeypatch, tmp_path, roles=[])
     r = _approve("")
     assert r["status"] == "ok" and "role" not in r
-    assert not any(c[0] in ("list", "assign") for c in calls)
+    assert not any(c[0] in ("assign", "remove_roles") for c in calls)
     assert "role" not in approval_store.get("ou_a", "app-a")
+
+
+# ── 角色强制(里程碑 3):分了角色的应用,批准必须带角色 ──
+# 卡片在读不到角色清单时会降级成普通"批准"按钮;那张卡对分了角色的应用不能用,
+# 拒绝并让卡片回调重发一张带角色按钮的卡片(resend_card)。
+
+def test_plain_approve_rejected_when_app_has_roles(monkeypatch, tmp_path):
+    calls = _setup_roles(monkeypatch, tmp_path)
+    r = _approve("")
+    assert r["status"] == "error" and r.get("resend_card") is True and "decision" not in r
+    assert "角色" in r["message"]
+    assert not any(c[0] in ("assign", "add", "remove_roles") for c in calls)
+    assert approval_store.get("ou_a", "app-a")["status"] == "pending"
+
+def test_plain_approve_with_role_list_unavailable_asks_retry(monkeypatch, tmp_path):
+    calls = _setup_roles(monkeypatch, tmp_path, roles=None)
+    r = _approve("")
+    assert r["status"] == "error" and "再点" in r["message"] and not r.get("resend_card")
+    assert not any(c[0] == "add" for c in calls)
+    assert approval_store.get("ou_a", "app-a")["status"] == "pending"
+
+
+# ── 角色不留残余:"批准为「X」"= 该应用只留 X;拒绝 = 撤掉该应用全部角色 ──
+
+def test_approve_with_role_first_clears_other_roles_of_that_app(monkeypatch, tmp_path):
+    """修"上次赋角成功、加组失败,审批人改点另一个角色 → 两个角色都在"。"""
+    calls = _setup_roles(monkeypatch, tmp_path)
+    r = _approve("app-a-editor")
+    assert r["status"] == "ok"
+    assert ("remove_roles", "ou_a", "app-a", "app-a-editor") in calls
+    assert [c[0] for c in calls if c[0] in ("remove_roles", "assign", "add")] == ["remove_roles", "assign", "add"]
+
+def test_approve_role_cleanup_failure_keeps_pending_and_group_closed(monkeypatch, tmp_path):
+    calls = _setup_roles(monkeypatch, tmp_path, cleanup=False)
+    r = _approve("app-a-editor")
+    assert r["status"] == "error" and "再点" in r["message"] and "decision" not in r
+    assert not any(c[0] in ("assign", "add") for c in calls)
+    assert approval_store.get("ou_a", "app-a")["status"] == "pending"
+
+
+def test_deny_removes_that_apps_roles(monkeypatch, tmp_path):
+    calls = _setup_roles(monkeypatch, tmp_path)
+    r = asyncio.run(decision.handle("sso_deny", operator_id="ou_boss", owner="ou_boss", sso_open_id="ou_a", app="app-a", client=None))
+    assert r["status"] == "ok" and r["decision"] == "denied"
+    assert ("remove_roles", "ou_a", "app-a", "") in calls
+
+@pytest.mark.parametrize("cleanup", [False, "raise"])
+def test_deny_role_removal_failure_is_non_fatal(monkeypatch, tmp_path, cleanup):
+    """拒绝是审批人的决定,撤角色失败只记日志,不影响拒绝生效(没有准入组,残余角色进不了应用)。"""
+    calls = _setup_roles(monkeypatch, tmp_path, cleanup=cleanup)
+    r = asyncio.run(decision.handle("sso_deny", operator_id="ou_boss", owner="ou_boss", sso_open_id="ou_a", app="app-a", client=None))
+    assert r["status"] == "ok"
+    assert approval_store.get("ou_a", "app-a")["status"] == "denied"
+    assert any(c[0] == "remove_roles" for c in calls)
+
+
+# ── 超时升级:升级对象和原审批人都能处理这条申请,谁先点算谁 ──
+
+def test_escalation_target_can_decide_and_is_recorded(monkeypatch, tmp_path):
+    calls = _setup(monkeypatch, tmp_path)
+    approval_store.mark_escalated("ou_a", "app-a", "ou_esc")
+    r = asyncio.run(decision.handle("sso_approve", operator_id="ou_esc", owner="ou_boss", sso_open_id="ou_a", app="app-a", client=None))
+    assert r["status"] == "ok" and r["decision"] == "approved"
+    assert ("add", "ou_a", "approved-app-a") in calls
+    assert approval_store.get("ou_a", "app-a")["approved_by"] == "ou_esc"
+
+def test_escalation_target_of_another_record_cannot_decide(monkeypatch, tmp_path):
+    calls = _setup(monkeypatch, tmp_path)
+    approval_store.mark_pending("ou_other", "app-a", {"name": "别人"})
+    approval_store.mark_escalated("ou_other", "app-a", "ou_esc")     # 升级的是别人的申请
+    r = asyncio.run(decision.handle("sso_approve", operator_id="ou_esc", owner="ou_boss", sso_open_id="ou_a", app="app-a", client=None))
+    assert r["status"] == "error" and calls == []
+    assert approval_store.get("ou_a", "app-a")["status"] == "pending"

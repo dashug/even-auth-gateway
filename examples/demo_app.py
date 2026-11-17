@@ -19,6 +19,7 @@ APP         = os.environ.get("APP_NAME", "demo-app") # 你的应用短名
 PUBLIC_URL  = os.environ.get("PUBLIC_URL", "http://127.0.0.1:9100")
 SECRET      = os.environ.get("SESSION_SECRET", "demo-secret")
 GATEWAY     = os.environ.get("GATEWAY_URL", "")      # 治理服务地址(可选):设了就自动上报待审批、推审批卡片
+REQUIRE_ROLE = os.environ.get("REQUIRE_ROLE", "") not in ("", "0", "false")  # 你的应用分了角色就开:没角色不让进
 
 APPROVED_GROUP = f"{ORG}/approved-{APP}"             # 你的准入组
 REDIRECT_URI   = f"{PUBLIC_URL}/callback"
@@ -65,6 +66,9 @@ async def callback(request: Request):
     # roles 元素随 Casdoor 版本是名字字符串或 {owner,name,...} 对象,两种都兼容
     names = [r.get("name", "") if isinstance(r, dict) else str(r) for r in (claims.get("roles") or [])]
     roles = [n for n in names if n.startswith(f"{APP}-")]
+    if REQUIRE_ROLE and not roles:
+        # 分了角色的应用:有准入但没角色 = 不知道该给什么权限,拒绝(网关审批时已强制选角色,这里是兜底)
+        return HTMLResponse("<h3>已获准入,但还没有分配本应用的角色</h3>请联系本应用的审批人分配角色。", 403)
     return HTMLResponse(f"<h3>✅ 登录成功</h3>open_id(sub): {claims.get('sub')}<br>"
                         f"姓名: {claims.get('displayName')}<br>邮箱: {claims.get('email')}<br>"
                         f"本应用角色: {roles or '(默认)'}")

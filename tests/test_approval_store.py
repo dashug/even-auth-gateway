@@ -116,3 +116,26 @@ def test_all_records_returns_raw_map_with_open_id_and_app(monkeypatch, tmp_path)
     for rec in recs.values():
         rec["status"] = "hacked"
     assert s.get("ou_multi", "app-a")["status"] == "pending"
+
+
+def test_mark_escalated_records_target_and_reapply_clears_it(monkeypatch, tmp_path):
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_x", "app-a", {"name": "张三"})
+    s.mark_escalated("ou_x", "app-a", "ou_esc")
+    rec = s.get("ou_x", "app-a")
+    assert rec["escalated_to"] == "ou_esc" and rec["escalated_at"] and rec["status"] == "pending"
+    s.mark_denied("ou_x", "app-a", "ou_esc")
+    s.mark_pending("ou_x", "app-a", {"name": "张三"})          # 被拒后重新申请:新一轮,升级记录清零
+    assert "escalated_to" not in s.get("ou_x", "app-a")
+
+
+def test_first_notified_at_is_kept_across_reminders(monkeypatch, tmp_path):
+    """催办会刷新 notified_at;超时升级要从审批人第一次收到卡片算起,所以另记一次性的 first_notified_at。"""
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("ou_x", "app-a", {"name": "张三"})
+    s.mark_notified("ou_x", "app-a")
+    first = s.get("ou_x", "app-a")["first_notified_at"]
+    s._set("ou_x", "app-a", notified_at="2000-01-01T00:00:00+00:00")
+    s.mark_notified("ou_x", "app-a")
+    rec = s.get("ou_x", "app-a")
+    assert rec["first_notified_at"] == first and rec["notified_at"] != "2000-01-01T00:00:00+00:00"

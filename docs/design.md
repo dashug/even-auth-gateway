@@ -13,7 +13,10 @@
 > | webhook 验签（HMAC） | Casdoor 不签 body，改为自定义头共享 token 比对（`docs/casdoor-findings.md` §6） |
 > | 卡片回调 HTTP 路由 | 已移除，只走飞书 WS（SDK 验来源）；审批结果另发消息回告审批人与申请人 |
 > | `/request-access` 与 webhook 共用共享 token | 改为接入应用转交用户的 Casdoor id_token，网关验签；申请人与应用（`aud`→`APP_CLIENT_IDS`）都取自签名 claim，防冒名（`even_auth_gov/id_token.py`） |
-> | 「审批与角色合一」（有角色 = 准入） | **未采用**：准入仍是 `approved-<app>` 组，角色是附加项。卡片按 Casdoor 里 `<app>-<role>` 出"批准为「X」"按钮，先赋角色再加组；不分角色的应用零改动，离职清组即断权（`casdoor-findings.md` §7） |
+> | 「审批与角色合一」（有角色 = 准入） | **未采用**：准入仍是 `approved-<app>` 组，角色是附加项。卡片按 Casdoor 里 `<app>-<role>` 出"批准为「X」"按钮，该应用只留所选角色、再加组；拒绝撤该应用角色，离职撤全部组与角色；不分角色的应用零改动（`casdoor-findings.md` §7） |
+> | （新增，里程碑 3）角色强制 | 分了角色的应用不许"有准入没角色"：无角色批准被拒并重发带角色卡片；迁移 `--role`；应用侧兜底拒绝 |
+> | （新增，里程碑 3）审批超时升级 | 审批人第一次收到卡片后超 `APPROVAL_ESCALATE_HOURS` 未处理 → 卡片升级给 `APPROVAL_ESCALATE_TO`，两人谁先点算谁；每小时待批扫描 |
+> | （新增，里程碑 3）权限视图 / 撤权核对 | `access_report`：以 Casdoor 组/角色/账号状态为准合上审批库，导出"人 × 应用"表与异常清单；每日对账后推送高/中级异常 |
 >
 > 文中 `docs/superpowers/specs/...` 路径指 even-cs-hub 仓库内的文档。
 前置：选型调研（buy-on-Casdoor，见对话记录）+ 已完成的 CS Hub 飞书 SSO（`docs/superpowers/specs/2026-07-03-feishu-sso-design.md`）

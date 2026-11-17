@@ -36,3 +36,13 @@ def test_card_without_roles_has_no_role_in_values():
     buttons = card["elements"][-1]["actions"]
     assert [b["text"]["content"] for b in buttons] == ["批准 ✅", "拒绝"]
     assert all("role" not in b["value"] for b in buttons)
+
+
+def test_card_note_is_shown_above_applicant_info():
+    """超时升级等场景:卡片顶部带一行说明(为什么发给你)。"""
+    card = build_sso_approval_card("ou_a", "申请人", "a@e.com", "app-a", note="已等待 26 小时未处理,升级给你")
+    text = card["elements"][0]["content"]
+    assert text.startswith("⏰ 已等待 26 小时未处理,升级给你")
+    assert "申请人" in text
+    plain = build_sso_approval_card("ou_a", "申请人", "a@e.com", "app-a")
+    assert "⏰" not in plain["elements"][0]["content"]

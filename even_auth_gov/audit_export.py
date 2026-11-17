@@ -18,7 +18,7 @@ from even_auth_gov import approval_store
 
 COLUMNS = [
     "open_id", "app", "status", "name", "email",
-    "applied_at", "notified_at",
+    "applied_at", "first_notified_at", "notified_at", "escalated_to", "escalated_at",
     "approved_by", "approved_at", "role",
     "denied_by", "denied_at",
     "disabled_reason", "disabled_at",

@@ -84,7 +84,7 @@ async def send_card(receive_id: str, card: dict, receive_id_type: str = "open_id
 
 
 def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "",
-                            roles: list[dict] | None = None) -> dict:
+                            roles: list[dict] | None = None, note: str = "") -> dict:
     """Build the admin-approval card for a Feishu SSO login application.
 
     `app` identifies which downstream application this applicant is requesting
@@ -97,7 +97,10 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
     `roles`(F-5.5.3 审批即赋角):该应用在 Casdoor 建好的角色 [{"name", "display"}]。
     有角色时每个角色一个"批准为「X」"按钮(value 带 role),点一下 = 批准 + 定角色;
     没有则保持单个"批准"按钮。
+
+    `note`:卡片顶部的一行说明(如超时升级"已等待 N 小时未处理"),没有则不显示。
     """
+    note_line = f"⏰ {note}\n\n" if note else ""
     email_line = f"\n**企业邮箱:** {email}" if email else ""
     app_line = f"\n**申请接入应用:** {app}" if app else ""
     title = f"🔐 {app} 接入申请" if app else "🔐 应用接入申请"
@@ -137,7 +140,7 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
             "template": "orange",
         },
         "elements": [
-            {"tag": "markdown", "content": f"**申请人:** {name}{email_line}{app_line}\n\n{hint}"},
+            {"tag": "markdown", "content": f"{note_line}**申请人:** {name}{email_line}{app_line}\n\n{hint}"},
             {"tag": "hr"},
             action,
         ],

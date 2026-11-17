@@ -260,3 +260,44 @@ def test_approved_with_role_tells_applicant_the_role(monkeypatch):
         {"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b", "role": "app-b-editor"})))
     to = {rid: text for rid, text in sent}
     assert "编辑者" in to["ou_x"] and "app-b" in to["ou_x"]
+
+
+# ── 角色强制:点了不带角色的旧卡片/降级卡片 → decision 要求重发,给点击人补一张带角色按钮的卡片 ──
+
+def test_process_card_resends_role_card_to_clicker_when_decision_asks(monkeypatch, tmp_path):
+    from even_auth_gov import decision, webhook, approval_store
+
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    approval_store.mark_pending("ou_x", "app-b", {"name": "申请人", "email": "x@e.com"})
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "error", "message": "该应用已分角色,请在新卡片上选择角色", "resend_card": True}
+
+    resent = []
+    async def fake_notify(open_id, app, name="", email="", to="", note=""):
+        resent.append((open_id, app, name, email, to)); return True
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setattr(webhook, "notify_pending", fake_notify)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    sent = _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"},
+                                                    operator_open_id="ou_boss")))
+    assert resent == [("ou_x", "app-b", "申请人", "x@e.com", "ou_boss")]
+    assert [rid for rid, _ in sent] == ["ou_boss"]          # 申请人不收任何结果
+
+
+def test_process_card_error_without_resend_flag_does_not_resend(monkeypatch, tmp_path):
+    from even_auth_gov import decision, webhook
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "error", "message": "Casdoor 加组失败"}
+
+    resent = []
+    async def fake_notify(*a, **k): resent.append(a); return True
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setattr(webhook, "notify_pending", fake_notify)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"})))
+    assert resent == []
