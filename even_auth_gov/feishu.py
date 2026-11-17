@@ -83,46 +83,62 @@ async def send_card(receive_id: str, card: dict, receive_id_type: str = "open_id
     return True
 
 
-def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "") -> dict:
+def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "",
+                            roles: list[dict] | None = None) -> dict:
     """Build the admin-approval card for a Feishu SSO login application.
 
     `app` identifies which downstream application this applicant is requesting
     access to (design-review #2/#16: the card must carry app identity so an
     approval for app A can never be mistaken for — or silently grant — access
-    to app B). It rides along in both button `value` payloads so
+    to app B). It rides along in every button `value` payload so
     feishu_ws._on_card / decision.handle can act on the right (open_id, app)
     pair, and is surfaced in the card text for the human approver.
+
+    `roles`(F-5.5.3 审批即赋角):该应用在 Casdoor 建好的角色 [{"name", "display"}]。
+    有角色时每个角色一个"批准为「X」"按钮(value 带 role),点一下 = 批准 + 定角色;
+    没有则保持单个"批准"按钮。
     """
     email_line = f"\n**企业邮箱:** {email}" if email else ""
     app_line = f"\n**申请接入应用:** {app}" if app else ""
+    title = f"🔐 {app} 接入申请" if app else "🔐 应用接入申请"
+    base = {"sso_open_id": open_id, "app": app}
+    if roles:
+        hint = "批准时请选择角色,批准后对方重新登录即可进入该应用。"
+        approve = [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"批准为「{r['display']}」"},
+                "type": "primary",
+                "value": {"action": "sso_approve", **base, "role": r["name"]},
+            }
+            for r in roles
+        ]
+    else:
+        hint = "批准后对方重新登录即可进入该应用。"
+        approve = [{
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "批准 ✅"},
+            "type": "primary",
+            "value": {"action": "sso_approve", **base},
+        }]
+    deny = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "拒绝"},
+        "type": "danger",
+        "value": {"action": "sso_deny", **base},
+    }
+    action = {"tag": "action", "actions": approve + [deny]}
+    if roles:
+        action["layout"] = "flow"   # 角色多时按钮自动换行
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "🔐 后台登录申请"},
+            "title": {"tag": "plain_text", "content": title},
             "template": "orange",
         },
         "elements": [
-            {
-                "tag": "markdown",
-                "content": f"**申请人:** {name}{email_line}{app_line}\n\n批准后对方重新扫码即可进入管理后台。",
-            },
+            {"tag": "markdown", "content": f"**申请人:** {name}{email_line}{app_line}\n\n{hint}"},
             {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "批准 ✅"},
-                        "type": "primary",
-                        "value": {"action": "sso_approve", "sso_open_id": open_id, "app": app},
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "拒绝"},
-                        "type": "danger",
-                        "value": {"action": "sso_deny", "sso_open_id": open_id, "app": app},
-                    },
-                ],
-            },
+            action,
         ],
     }

@@ -36,8 +36,35 @@ services:
       RUNNING_IN_DOCKER: "true"
       driverName: postgres
       dataSourceName: "user=${CASDOOR_DB_USER:-casdoor} password=${CASDOOR_DB_PASSWORD:-casdoor_local_pw} host=casdoor-db port=5432 sslmode=disable dbname=${CASDOOR_DB_NAME:-casdoor}"
+      # 新版镜像没有默认 admin/123:内置超管密码只在**首次启动**时取这个值;不设则要开浏览器自己设
+      # (谁先打开谁设,所以别在设好之前把端口暴露出去)。
+      initAdminPassword: ${CASDOOR_INIT_ADMIN_PASSWORD:-}
     ports:
       - "127.0.0.1:${CASDOOR_PORT:-8000}:8000"   # 生产由 nginx 反代，仅本地暴露
 
+  # 治理服务（审批卡片 / 离职停用 / 对账）。放在 profile 里，默认 up 不起，只起 Casdoor：
+  #   cp gov.env.example gov.env   # 填飞书 / Casdoor 凭据
+  #   docker compose -f deploy/casdoor/docker-compose.yml --profile gov up -d --build
+  # Casdoor 后台 webhook URL 填 http://even-auth-gov:8080/casdoor/webhook（走 compose 内网）。
+  # 单实例运行，不要 scale（见 README「单实例约束」）。
+  even-auth-gov:
+    profiles: ["gov"]
+    build:
+      context: ../..
+    image: ${GOV_IMAGE:-even-auth-gov:local}
+    restart: unless-stopped
+    depends_on:
+      - casdoor
+    env_file:
+      - gov.env
+    environment:
+      CASDOOR_ENDPOINT: http://casdoor:8000      # 容器内网直连 Casdoor
+      APPROVAL_STORE_FILE: /data/approvals.json
+    volumes:
+      - gov_data:/data                           # 审批状态 + 审计留痕，backup.sh 一并备份
+    ports:
+      - "127.0.0.1:${GOV_PORT:-8100}:8080"      # /request-access 由 nginx 反代给接入应用，仅本地暴露
+
 volumes:
   casdoor_pg:
+  gov_data:

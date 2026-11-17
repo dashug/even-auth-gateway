@@ -37,7 +37,12 @@ async def _run_reconcile_job() -> None:
         await reconcile.run(client)
 
 
-def start_scheduler(db=None, kb=None) -> AsyncIOScheduler:
+def is_running() -> bool:
+    """对账调度器是否在跑(/healthz 用)。"""
+    return _scheduler is not None and bool(_scheduler.running)
+
+
+def start_scheduler() -> AsyncIOScheduler:
     """Start the daily reconcile scheduler (idempotent — returns existing instance if running)."""
     global _scheduler
 

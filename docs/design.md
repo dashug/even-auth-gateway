@@ -1,7 +1,21 @@
 # 设计：统一飞书登录网关 / 身份中心（子项目一 — 地基 + CS Hub 试点）
 
 日期：2026-07-04
-状态：已与需求方对齐，待实施
+状态：已实施（下文保留子项目一的原始设计；与现状不一致处以下表为准）
+
+> **实现现状（2026-11 更新）**——本文写于单应用阶段，以下几处已被后续实现取代：
+>
+> | 本文写法 | 现状 |
+> |---|---|
+> | 单一准入组 `approved-operators` | 按应用分组 `approved-<app>`，审批按 `(open_id, app)` 记，见下文「多应用授权模型」与 README |
+> | 硬删除延续 fail-open | 飞书 get-user 返回 `99992351`（查无此人）→ 视为离职并禁用；仅瞬时错误 fail-open（`reconcile.py`） |
+> | 离职"移出组"按本地审批记录 | 以 Casdoor 实际组为准，一次清掉所有 `approved-*`（覆盖迁移/手工授权用户） |
+> | webhook 验签（HMAC） | Casdoor 不签 body，改为自定义头共享 token 比对（`docs/casdoor-findings.md` §6） |
+> | 卡片回调 HTTP 路由 | 已移除，只走飞书 WS（SDK 验来源）；审批结果另发消息回告审批人与申请人 |
+> | `/request-access` 与 webhook 共用共享 token | 改为接入应用转交用户的 Casdoor id_token，网关验签；申请人与应用（`aud`→`APP_CLIENT_IDS`）都取自签名 claim，防冒名（`even_auth_gov/id_token.py`） |
+> | 「审批与角色合一」（有角色 = 准入） | **未采用**：准入仍是 `approved-<app>` 组，角色是附加项。卡片按 Casdoor 里 `<app>-<role>` 出"批准为「X」"按钮，先赋角色再加组；不分角色的应用零改动，离职清组即断权（`casdoor-findings.md` §7） |
+>
+> 文中 `docs/superpowers/specs/...` 路径指 even-cs-hub 仓库内的文档。
 前置：选型调研（buy-on-Casdoor，见对话记录）+ 已完成的 CS Hub 飞书 SSO（`docs/superpowers/specs/2026-07-03-feishu-sso-design.md`）
 
 ## 背景与目标
@@ -146,7 +160,7 @@ CS Hub → Casdoor(若已有 SSO 会话则免扫码 = 真 SSO) → id_token 带�
 - 卡片发送失败 → pending 记录仍建，日志告警，用户重登看"待审批"。
 - OIDC 回调 state/nonce 校验失败 → 回登录页带错误。
 - Casdoor 不可用 → CS Hub 展示友好错误 + 密码应急入口仍可用（过渡期）。
-- 离职事件与对账对硬删除延续既有 fail-open 策略（飞书 get-user 无可靠 not-found 码，见前置 spec）。
+- ~~离职事件与对账对硬删除延续既有 fail-open 策略~~ → 已改：飞书 get-user 实测对硬删除返回 `99992351`，命中即禁用；超时/5xx/限流等瞬时错误才 fail-open（评审 #5）。
 
 ## 迁移与回滚（CS Hub 试点）
 

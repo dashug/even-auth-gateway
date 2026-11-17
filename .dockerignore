@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+data/
+docs/
+tests/
+examples/
+deploy/

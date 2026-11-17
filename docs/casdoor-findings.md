@@ -82,3 +82,27 @@
   - ⟹ `webhook._extract_user` 按 `extendedUser` > `object`(str→解析) > `user`(dict 兜底) 取用户对象。
 - **Webhook 触发按 record 的 organization 匹配**，record.org = **操作者的 org**（admin 操作 → built-in），非目标对象 org。生产真实飞书 signup 走应用 org（如 even-test）。
 - ⚠️ **本地实例的 webhook 投递未触发**（record 正常生成但 Casdoor 未发出，疑似 webhook 缓存/构建差异）——故上述对齐由**官方文档 + 接收端活验**（真实 Record 形状 payload 打 `/casdoor/webhook`：正确 token→200、错/无 token→401、pending 正确建出）确认，**非 Casdoor 自身投递抓包**确认。生产接线时以真实回调再核一次头名/ body 形状。
+
+---
+
+## 7. id_token 验签 + 角色 API（2026-11-16 实测，Casdoor v4.29.0，`casbin/casdoor@sha256:d04c4481…`）
+
+用仓库 compose 起的临时实例（独立 project，端口 18000），org `even-test` + 应用 `demo-app`（`tokenFormat=JWT-Custom`，tokenFields 同接入指南）+ 用户 id 设为 `ou_test_*`，password grant 换 token。
+
+- **新版镜像没有默认 `admin/123`**：日志 `The password of built-in/admin is not set, open Casdoor in the browser to set it, or set initAdminPassword before the first start`。环境变量 `initAdminPassword` 只在首次启动（空库）生效；传空字符串等同未设（实测：空库 + 空值 → 仍是 not set，空密码登录被拒）。
+  - ⟹ compose 已接 `initAdminPassword: ${CASDOOR_INIT_ADMIN_PASSWORD:-}`，`.env.example` 加了该项。
+- **id_token 形状**：header `{"alg":"RS256","kid":"cert-built-in","typ":"JWT"}`（kid = 应用绑定的证书名）；claim `aud=["<clientId>"]`（**列表**）、`azp=<clientId>`、`sub=<用户 id>`（飞书用户 = open_id）、`displayName`、`email`、`groups`、`roles`、`tokenType="id-token"`。默认 TTL 168h（`expireInHours`）。
+- **三种 token 都是同一把钥匙签的 JWT，aud 相同**，只靠 `tokenType` 区分：`access-token` / `id-token` / `refresh-token`。
+  - ⟹ `/request-access` 只收 `tokenType=id-token`，refresh_token 不该被到处传。
+- **`iss` 取签发请求的 Host**（本次 `http://127.0.0.1:18000`），不是固定值。治理服务走内网 `http://casdoor:8000` 访问，和 iss 不同。
+  - ⟹ 期望的 iss 单独配 `CASDOOR_ISSUER`（Casdoor 对外地址）；留空不校验（签名已由 JWKS 保证）。容器内实测：内网拉 JWKS + iss 配对外地址 → 验过。
+- **JWKS**：`GET /.well-known/jwks` → `[{kid:"cert-built-in", kty:"RSA", alg:"RS256"}]`，PyJWT 用它验 id_token 通过；篡改 payload（改 sub）→ `Signature verification failed`。
+- **`roles` claim 是对象列表**：`[{"owner":"even-test","name":"demo-app-viewer","displayName":"查看者","users":null,...}]`——不是 07 月记录的名字列表（版本差异）。接入方两种都要兼容。`get-user` 返回的 `roles` 字段则是名字。
+- **角色 API**（clientId/clientSecret query 鉴权）：
+  - 列表：`GET /api/get-roles?owner=<org>` → `[{name, displayName, users, isEnabled, ...}]`。
+  - 单个：`GET /api/get-role?id=<org>/<role>`，不存在时 `status=ok, data=null`。
+  - 加人：`POST /api/update-role?id=<org>/<role>` 整对象回写，`users` 元素是 **`<owner>/<name>`**（Casdoor 用户名，不是 open_id）。改完重新换的 token 里 `roles` 即带上该角色。
+  - ⟹ `casdoor_admin.list_app_roles` / `assign_role` 按此实现，与组变更共用进程内锁（role 对象同样是整对象读-改-写）。
+- **签名有效 ≠ 人还在职**：id_token 默认 168h，禁用账号后旧 token 照样验签通过。
+  - ⟹ `/request-access` 验签后再 `get-user` 查实时状态：`isForbidden` → 403，查不到 → 503；“已有准入”也按实时 groups 判断。实测：先换 token 再禁用 → 403、不建申请。
+- **端到端**（真实代码，仅把飞书发送换成捕获）：真实 id_token → `/request-access` 建 pending（姓名取自 claim，body 冒填被忽略）→ 卡片按角色出"批准为「编辑者」/「查看者」…"→ 模拟审批人点"编辑者"→ 先 `update-role` 再加 `approved-demo-app` 组 → 新 token `groups=["even-test/approved-demo-app"]`、`roles=[demo-app-editor]`；已准入用户再上报返回 `approved`。

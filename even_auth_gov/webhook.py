@@ -40,9 +40,22 @@ def _extract_user(evt: dict) -> dict:
     return u2 if isinstance(u2, dict) else {}
 
 
-# 由 app.py 启动时注入真实实现(发飞书卡片);测试用 monkeypatch 覆盖
+# 由 app.py 启动时注入真实实现(发飞书卡片);测试用 monkeypatch 覆盖。
+# 契约:**卡片没真正送达就抛异常**(飞书 API 失败、审批人未配……),调用方据此不记 notified_at。
 async def send_approval_card(info: dict) -> None:  # pragma: no cover - overridden at runtime
     raise NotImplementedError
+
+
+async def notify_pending(open_id: str, app: str, name: str = "", email: str = "") -> bool:
+    """推审批卡片,送达才记 notified_at;失败只记日志、返回 False —— pending 已落库,
+    reconcile 会按 notified_at 为空补发(#12)。webhook / /request-access / reconcile 共用。"""
+    try:
+        await send_approval_card({"open_id": open_id, "name": name, "email": email, "app": app})
+    except Exception as e:
+        logger.warning("审批卡片推送失败 %s app=%s: %s(pending 已建,对账会补发)", open_id, app, e)
+        return False
+    approval_store.mark_notified(open_id, app)
+    return True
 
 
 async def handle(body: bytes, token: str) -> dict:
@@ -62,13 +75,10 @@ async def handle(body: bytes, token: str) -> dict:
     # Casdoor signup webhook 不带 app 信息(它不知道用户是为哪个应用注册的) ——
     # 落到 default_app() 上,与现有 cs-hub 试点保持向后兼容。
     app = settings.default_app()
-    is_new = approval_store.mark_pending(
-        open_id, app, {"name": user.get("name", ""), "email": user.get("email", "")}
-    )
+    # 飞书用户在 Casdoor 的 name 是随机串,给审批人看的是 displayName(飞书姓名)。
+    name = user.get("displayName") or user.get("name", "")
+    email = user.get("email", "")
+    is_new = approval_store.mark_pending(open_id, app, {"name": name, "email": email})
     if is_new:
-        await send_approval_card(
-            {"open_id": open_id, "name": user.get("name", ""), "email": user.get("email", ""), "app": app}
-        )
-        # 发送成功才留痕;若上面抛异常则 notified_at 保持空,reconcile 会补发(#12)
-        approval_store.mark_notified(open_id, app)
+        await notify_pending(open_id, app, name, email)
     return {"status": "ok"}

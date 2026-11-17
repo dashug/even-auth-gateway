@@ -10,7 +10,7 @@ import httpx
 from fastapi import FastAPI, Request
 from starlette.responses import RedirectResponse, HTMLResponse
 
-# ── 接入你只改这 6 个环境变量 ─────────────────────────────
+# ── 接入你只改这几个环境变量 ─────────────────────────────
 CASDOOR     = os.environ["CASDOOR_ENDPOINT"]        # 网关 Casdoor 地址
 CLIENT_ID   = os.environ["CASDOOR_CLIENT_ID"]        # 在 Casdoor 注册应用拿到
 CLIENT_SECRET = os.environ["CASDOOR_CLIENT_SECRET"]
@@ -18,6 +18,7 @@ ORG         = os.environ["CASDOOR_ORG"]              # 飞书用户所在 org
 APP         = os.environ.get("APP_NAME", "demo-app") # 你的应用短名
 PUBLIC_URL  = os.environ.get("PUBLIC_URL", "http://127.0.0.1:9100")
 SECRET      = os.environ.get("SESSION_SECRET", "demo-secret")
+GATEWAY     = os.environ.get("GATEWAY_URL", "")      # 治理服务地址(可选):设了就自动上报待审批、推审批卡片
 
 APPROVED_GROUP = f"{ORG}/approved-{APP}"             # 你的准入组
 REDIRECT_URI   = f"{PUBLIC_URL}/callback"
@@ -57,13 +58,27 @@ async def callback(request: Request):
     claims = _decode(tok["id_token"])
     # ── ③ 准入判定 ──
     if APPROVED_GROUP not in (claims.get("groups") or []):
-        return HTMLResponse(f"<h3>申请已提交,等待管理员批准</h3>用户: {claims.get('displayName')}<br>"
-                            f"缺组: {APPROVED_GROUP}<br>当前 groups: {claims.get('groups')}")
+        reported = await _request_access(tok["id_token"])
+        return HTMLResponse(f"<h3>申请已提交,等待审批</h3>用户: {claims.get('displayName')}<br>"
+                            f"缺组: {APPROVED_GROUP}<br>上报网关: {reported}")
     # 已准入 → 发你自己的会话(这里简化成直接展示身份)
-    roles = [r["name"] for r in (claims.get("roles") or []) if r.get("name","").startswith(f"{APP}-")]
+    # roles 元素随 Casdoor 版本是名字字符串或 {owner,name,...} 对象,两种都兼容
+    names = [r.get("name", "") if isinstance(r, dict) else str(r) for r in (claims.get("roles") or [])]
+    roles = [n for n in names if n.startswith(f"{APP}-")]
     return HTMLResponse(f"<h3>✅ 登录成功</h3>open_id(sub): {claims.get('sub')}<br>"
                         f"姓名: {claims.get('displayName')}<br>邮箱: {claims.get('email')}<br>"
                         f"本应用角色: {roles or '(默认)'}")
+
+# ── 待审批:把用户刚拿到的 id_token 交给网关(网关验签后建申请、推卡片;应用不持有网关密钥) ──
+async def _request_access(id_token: str) -> str:
+    if not GATEWAY:
+        return "未配置 GATEWAY_URL,需管理员手工加组"
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.post(f"{GATEWAY}/request-access", json={"id_token": id_token}, timeout=10)
+        return f"{r.status_code} {r.text}"
+    except Exception as e:
+        return f"上报失败: {e}"
 
 # ── ④ 解 id_token(取 payload;生产应加 JWKS 验签) ────────────
 def _decode(id_token: str) -> dict:
@@ -89,5 +104,6 @@ async def home():
 
 # 跑法:
 #   export CASDOOR_ENDPOINT=http://127.0.0.1:8000 CASDOOR_CLIENT_ID=... CASDOOR_CLIENT_SECRET=... CASDOOR_ORG=even-test
+#   export GATEWAY_URL=http://127.0.0.1:8100   # 可选;网关 APP_CLIENT_IDS 里要登记 demo-app:<CASDOOR_CLIENT_ID>
 #   uvicorn demo_app:app --port 9100
 # 然后开 http://127.0.0.1:9100/ 点登录。
