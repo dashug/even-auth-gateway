@@ -78,14 +78,8 @@ async def run(client) -> None:
     for r in _pending_needing_card():
         open_id = r.get("open_id", "")
         app = r.get("app") or settings.default_app()
-        try:
-            await webhook.send_approval_card(
-                {"open_id": open_id, "name": r.get("name", ""), "email": r.get("email", ""), "app": app}
-            )
-            approval_store.mark_notified(open_id, app)
+        if await webhook.notify_pending(open_id, app, r.get("name", ""), r.get("email", "")):
             logger.info("Reconcile: 补发待审批卡片 %s app=%s", open_id, app)
-        except Exception as e:
-            logger.warning("Reconcile: 补发卡片失败 %s app=%s: %s", open_id, app, e)
     # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
     # 离职是按用户的 —— 同一用户可能在多个 app 记录上都是 disable_failed,去重后只重试一次。
     for open_id in _distinct_open_ids_by_status("disable_failed"):

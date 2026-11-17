@@ -107,8 +107,12 @@ def mark_notified(open_id: str, app: str):
     """审批卡片已成功送达时留痕;reconcile 据此判断是否需要补发(#12)。"""
     _set(open_id, app, notified_at=_now())
 
-def mark_approved(open_id: str, app: str, by: str):
-    _set(open_id, app, status="approved", approved_by=by, approved_at=_now())
+def mark_approved(open_id: str, app: str, by: str, role: str = ""):
+    """role:审批时一并分配的 Casdoor 角色名(F-5.5.3),留痕供审计导出;未分配则不写该字段。"""
+    fields = {"status": "approved", "approved_by": by, "approved_at": _now()}
+    if role:
+        fields["role"] = role
+    _set(open_id, app, **fields)
 
 def mark_denied(open_id: str, app: str, by: str):
     _set(open_id, app, status="denied", denied_by=by, denied_at=_now())

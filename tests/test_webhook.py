@@ -99,3 +99,28 @@ def test_signup_uses_settings_default_app_when_env_unset(monkeypatch, tmp_path):
     assert r["status"] == "ok"
     assert approval_store.get("ou_legacy", "cs-hub")["status"] == "pending"
     assert sent[0]["app"] == "cs-hub"
+
+
+def test_card_send_failure_keeps_pending_unnotified_and_returns_ok(monkeypatch, tmp_path):
+    """#12:推卡片失败(抛异常)不该让 webhook 500;pending 照建、notified_at 留空等对账补发。"""
+    _env(monkeypatch, tmp_path)
+    async def failing_send(info): raise RuntimeError("feishu down")
+    monkeypatch.setattr(webhook, "send_approval_card", failing_send)
+    body = json.dumps({"action": "signup", "object": json.dumps({"id": "ou_n", "name": "新人"})}).encode()
+    r = asyncio.run(webhook.handle(body, token="shh"))
+    assert r["status"] == "ok"
+    rec = approval_store.get("ou_n", "app-a")
+    assert rec["status"] == "pending" and rec["notified_at"] == ""
+
+
+def test_card_shows_display_name_not_random_casdoor_name(monkeypatch, tmp_path):
+    """飞书用户在 Casdoor 的 name 是随机串(casdoor-findings §1),审批人要看的是 displayName。"""
+    _env(monkeypatch, tmp_path)
+    sent = []
+    async def fake_send(info): sent.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    body = json.dumps({"action": "signup", "extendedUser": {
+        "id": "ou_n", "name": "a8f3k2x9", "displayName": "张三", "email": "z@e.com"}}).encode()
+    asyncio.run(webhook.handle(body, token="shh"))
+    assert sent[0]["name"] == "张三"
+    assert approval_store.get("ou_n", "app-a")["name"] == "张三"

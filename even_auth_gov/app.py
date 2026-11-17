@@ -15,9 +15,14 @@ app-wiring tests stay green):
 from __future__ import annotations
 import asyncio
 import contextlib
+import logging
 import os
 from fastapi import FastAPI, Request, Response
-from even_auth_gov import webhook as wh, settings, feishu_ws, scheduler, approval_store, logging_setup
+from fastapi.responses import JSONResponse
+from even_auth_gov import (webhook as wh, settings, feishu_ws, scheduler, approval_store, logging_setup,
+                           casdoor_admin as ca, id_token)
+
+logger = logging.getLogger(__name__)
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() not in ("", "0", "false", "no")
@@ -38,7 +43,7 @@ async def _lifespan(app: FastAPI):
 def _webhook_token(request: Request) -> str:
     # Casdoor 无 body 签名,认证靠 webhook 配置的自定义头传共享 token。
     # header 名由 CASDOOR_WEBHOOK_HEADER 配(默认 X-Webhook-Token),须与 Casdoor 后台 webhook 的 header 名一致。
-    # /request-access 复用同一套共享 token:接入应用拿到这个密钥,即可向网关上报待批用户。
+    # 这个密钥只给 Casdoor 用;/request-access 改为验用户的 id_token,接入应用不持有它。
     header = os.getenv("CASDOOR_WEBHOOK_HEADER", "X-Webhook-Token")
     return request.headers.get(header, "")
 
@@ -47,16 +52,33 @@ def build_app() -> FastAPI:
     app = FastAPI(title="even-auth-gov", lifespan=_lifespan)
 
     async def _send_card(info: dict):
+        """推审批卡片给该 app 的审批人。没真正送达就抛异常(见 webhook.send_approval_card 契约),
+        否则会被误记 notified_at、reconcile 不再补发(#12)。"""
         if os.getenv("TESTING"):
             return
         from even_auth_gov.feishu import build_sso_approval_card, send_card
         app_name = info.get("app", "") or settings.default_app()
         owner = settings.approver_for(app_name)
-        if owner and owner != "ou_xxx":
-            await send_card(owner, build_sso_approval_card(
-                info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name
-            ))
+        if not owner or owner == "ou_xxx":
+            raise RuntimeError(f"应用 {app_name} 未配置审批人(APPROVER_<APP> / APPROVER_FEISHU_ID)")
+        # 审批即赋角:该应用在 Casdoor 建了 <app>-<role> 就按角色出批准按钮。读不到清单时降级为
+        # 普通"批准"(只开准入、不给角色,权限上偏保守),不因此卡住审批或拖到次日对账补发。
+        async with ca.make_client() as client:
+            roles = await ca.list_app_roles(client, app_name, settings.known_apps())
+        if roles is None:
+            logger.warning("读取 %s 的角色清单失败,审批卡片不带角色按钮", app_name)
+        ok = await send_card(owner, build_sso_approval_card(
+            info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name, roles=roles or []
+        ))
+        if not ok:
+            raise RuntimeError(f"飞书 send_card 失败(审批人 {owner}, app={app_name})")
     wh.send_approval_card = _send_card
+
+    @app.get("/healthz")
+    async def healthz():
+        """探活(容器 healthcheck)。进程活着即 200;后台组件状态只作展示,不判死 ——
+        WS 断线有自带的退避重连,不该因此被编排系统反复重启。"""
+        return {"status": "ok", "feishu_ws": feishu_ws.is_running(), "scheduler": scheduler.is_running()}
 
     @app.post("/casdoor/webhook")
     async def casdoor_webhook(request: Request):
@@ -69,26 +91,37 @@ def build_app() -> FastAPI:
         """应用 #2+ 上报"某用户在等本应用的批准"。Casdoor signup webhook 只在用户
         首次注册时触发一次,已注册用户第一次接触新应用不会再有 webhook 事件——
         接入方需要自己调这个端点补上 mark_pending + 推审批卡片(带 app 标识)。
-        鉴权与 /casdoor/webhook 同一套共享 token,未带/带错 → 401。"""
-        if not wh._verify(_webhook_token(request)):
-            return Response(status_code=401)
+
+        body = {"id_token": "<用户刚登录该应用拿到的 Casdoor id_token>"}。申请人与应用全部取自
+        token 里 Casdoor 签名过的 claim(见 id_token.py),body 里其它字段一律忽略。
+        400 缺 token / 401 token 无效 / 403 应用未登记或账号已停用 / 503 拿不到 Casdoor 公钥或账号状态。"""
         try:
             body = await request.json()
         except Exception:
             body = {}
-        if not isinstance(body, dict):
-            body = {}
-        app_name = (body.get("app") or "").strip()
-        open_id = (body.get("open_id") or "").strip()
-        if not app_name or not open_id:
-            return Response(status_code=400)
-        name = body.get("name", "")
-        email = body.get("email", "")
-        is_new = approval_store.mark_pending(open_id, app_name, {"name": name, "email": email})
+        tok = body.get("id_token") if isinstance(body, dict) else None
+        if not isinstance(tok, str) or not tok.strip():
+            return JSONResponse({"error": "缺少 id_token"}, status_code=400)
+        try:
+            async with ca.make_client() as client:
+                who = await id_token.verify(client, tok.strip())
+                # token 默认 168h 有效,签名对不代表人还在职:以 Casdoor 账号实时状态为准。
+                account = await ca.get_user(client, who["open_id"])
+        except id_token.TokenRejected as e:
+            logger.warning("request-access 拒绝(%s): %s", e.status, e)
+            return JSONResponse({"error": str(e)}, status_code=e.status)
+        app_name, open_id = who["app"], who["open_id"]
+        if account is None:
+            return JSONResponse({"error": "暂时无法确认该账号在 Casdoor 的状态,请稍后重试"}, status_code=503)
+        if account.get("isForbidden"):
+            logger.warning("request-access 拒绝(403): %s 账号已停用 app=%s", open_id, app_name)
+            return JSONResponse({"error": "账号已停用"}, status_code=403)
+        if ca.approved_group(app_name) in (account.get("groups") or []):
+            return {"status": "approved", "app": app_name}   # 已有准入(如迁移进来的老用户),不必再批
+        is_new = approval_store.mark_pending(open_id, app_name, {"name": who["name"], "email": who["email"]})
         if is_new:
-            await _send_card({"open_id": open_id, "name": name, "email": email, "app": app_name})
-            approval_store.mark_notified(open_id, app_name)
-        return {"status": "ok" if is_new else "exists"}
+            await wh.notify_pending(open_id, app_name, who["name"], who["email"])
+        return {"status": "ok" if is_new else "exists", "app": app_name}
 
     # 飞书审批卡片回调走 WS 长连接(feishu_ws._on_card,由 lark-oapi SDK 验证来源),不开 HTTP 路由。
     # 明文 HTTP 回调无法验证飞书来源:operator.open_id 不是密文(出现在日志/卡片/组成员 API 里、可枚举),

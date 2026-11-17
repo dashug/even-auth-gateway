@@ -7,8 +7,8 @@
 
 APP-AWARE(设计评审 #2 #16)但离职本身仍是**按用户**的一次性动作:禁用 Casdoor
 账号 = 该用户对所有应用的登录能力一次性关闭,不需要、也不应该按 app 分别禁用。
-按 app 分的只是"移组"这一步 —— 用户可能同时是多个应用的 approved-<app> 组成员,
-需要逐个移除(records_for_open_id 拿到该用户名下所有 app 记录后遍历)。
+移组同样按用户一次做完:remove_approved_groups 清掉 Casdoor 上该用户所有 approved-* 组
+(以 Casdoor 为准,覆盖本地审批库里没有记录的迁移/手工授权用户)。
 """
 from __future__ import annotations
 import asyncio
@@ -53,16 +53,14 @@ async def apply(open_id: str, name: str, reason: str, client) -> bool:
         except Exception as e:
             ok, last_err = False, str(e)
         if ok:
-            # 移组尽力做:禁用已挡住登录,移组失败非致命。用户可能同时在多个
-            # 应用的准入组里(records_for_open_id 拿到该用户名下每个 app 记录),逐个移除。
-            for rec in approval_store.records_for_open_id(open_id):
-                rec_app = rec.get("app") or ""
-                if not rec_app:
-                    continue
-                try:
-                    await ca.remove_from_group(client, user_id=open_id, group=f"approved-{rec_app}")
-                except Exception as e:
-                    logger.warning("Offboard 移组失败 %s app=%s: %s(已禁用,非致命)", open_id, rec_app, e)
+            # 移组尽力做:禁用已挡住登录,移组失败非致命。以 Casdoor 实际组为准一次清掉
+            # 所有 approved-* —— 不靠本地审批库,迁移/手工授权进组的用户也清(否则账号被
+            # 重新启用时会绕过审批直接恢复全部应用访问)。
+            try:
+                if not await ca.remove_approved_groups(client, user_id=open_id):
+                    logger.warning("Offboard 移组失败 %s(已禁用,非致命)", open_id)
+            except Exception as e:
+                logger.warning("Offboard 移组失败 %s: %s(已禁用,非致命)", open_id, e)
             approval_store.mark_all_disabled(open_id, reason)
             logger.info("Offboard 已禁用 Casdoor: %s (%s) via %s(第 %d 次)", name, open_id, reason, attempt)
             return True

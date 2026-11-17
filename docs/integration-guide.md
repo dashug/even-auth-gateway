@@ -12,7 +12,7 @@
 
 1. **Applications → 新建你的应用**，拿到 `clientId` / `clientSecret`，Redirect URLs 填 `https://<你的应用>/callback`（逐字一致）。
 2. **Groups → 建准入组** `approved-<你的应用短名>`（例：`approved-demo-app`）。
-3.（要角色权限才做）**Roles → 建角色** `<应用短名>-<role>`（例：`demo-app-viewer`），把用户放进去。
+3.（要角色权限才做）**Roles → 建角色** `<应用短名>-<role>`（例：`demo-app-viewer`），**显示名填审批人看得懂的中文**（如"查看者"）。建好后审批卡片自动按角色出"批准为「查看者」"这类按钮，审批人点哪个就分配哪个角色；不建角色的应用，卡片只有"批准 / 拒绝"。
 4. **⚠️ 安全必做：裁 id_token 字段**——Casdoor 默认 `tokenFormat=JWT` 会把整个用户对象塞进 id_token（含 `passwordSalt` 等，实测泄露）。**关键：光设 tokenFields 不够，必须同时把 `tokenFormat` 改成 `JWT-Custom`**，白名单才生效。API 做法：
    ```
    POST <CASDOOR>/api/update-application?id=admin/<你的应用>
@@ -20,6 +20,7 @@
          "tokenFields":["Owner","Name","Id","Type","DisplayName","Avatar","Email","Groups","Roles"]}
    ```
    验证：重取 token，`passwordSalt` 应消失，claim 数从 80+ 降到 ~20，`groups/roles/email/sub` 仍在。
+5. **把应用登记到网关**：治理服务的 `APP_CLIENT_IDS` 里加一项 `<应用短名>:<clientId>`（应用短名就是准入组 `approved-<应用短名>` 里那段）。网关靠它把 id_token 的 `aud` 认成你的应用；没登记的应用调 `/request-access` 会收到 403。
 
 > 注册后你只需 4 个环境变量：`CASDOOR_ENDPOINT`、`CASDOOR_CLIENT_ID`、`CASDOOR_CLIENT_SECRET`、`CASDOOR_ORG`（飞书用户所在 org）。
 
@@ -79,7 +80,7 @@ set-cookie: oidc_state=<签名串>; HttpOnly; Max-Age=300; SameSite=lax
 |---|---|---|
 | `sub` | 用户唯一键（飞书用户 = 飞书 open_id） | 作为你库里的用户外键，**别用 `name`（随机串）** |
 | `groups` | `["<org>/<组名>"]` | 查 `"<org>/approved-<你的应用>"` 在不在 → 准入 |
-| `roles` | `["<角色名>", ...]`（裁剪后为名字列表） | 挑前缀 `<你的应用>-` 的 → 映射到你应用内部权限。**角色能干什么由你定义**，网关只递名字 |
+| `roles` | 角色列表。**元素形状随 Casdoor 版本不同**：较早版本是名字字符串；2026-11 实测 `latest` 是对象 `{"owner","name","displayName",...}` | 两种都兼容（是对象就取 `name`），挑前缀 `<你的应用>-` 的 → 映射到你应用内部权限。**角色能干什么由你定义**，网关只递名字 |
 
 ## OIDC 端点（据网关 discovery 实测，一次拉齐）
 
@@ -97,16 +98,42 @@ set-cookie: oidc_state=<签名串>; HttpOnly; Max-Age=300; SameSite=lax
 - 你签发的会话 **token 用短 TTL**（建议 5 分钟）+ 刷新回 Casdoor 复验，或每请求校验。
 - 离职时治理服务在 Casdoor 把用户置 `isForbidden=true` → 其会话立即失效 + 你应用下次刷新被拒 → **数分钟内自动登出**。你**无需实现 back-channel logout**。
 
-## 待审批的通知（现状 vs 规划，说清楚不含糊）
+## 待审批：把 id_token 交给网关，自动推审批卡片
 
-- **现在就能用**：用户认证成功但不在你的准入组 → 你的 `/callback` 展示"申请已提交，等待审批"页（demo 里就这么做）。审批动作 = 管理员/治理服务把该用户加进 `approved-<你的应用>` 组（可用治理服务的 `casdoor_admin.add_to_group`）。
-- **规划中（尚未实现）**：`POST <网关>/request-access {app, open_id, ...}` —— 应用主动上报待审批、自动推飞书审批卡片给该应用的审批人。见 [`docs/design.md`](design.md) 的「多应用授权模型」。**当前 demo 不依赖它**（它还没建），先靠管理员加组批准。
+用户认证成功但不在你的准入组 → 你的 `/callback` 展示"申请已提交，等待审批"页，**同时**把刚换到的 id_token 交给治理服务（demo 的 `_request_access` 就是这几行）：
+
+```
+POST <治理服务>/request-access
+Content-Type: application/json
+
+{"id_token": "<回调里换到的 id_token>"}
+```
+
+- **你的应用不持有任何网关密钥。** 网关用 Casdoor 公钥验签，申请人（`sub` / `displayName` / `email`）和应用（`aud` = 你的 clientId → `APP_CLIENT_IDS`）**全部取自 token**，body 里别的字段一律忽略——所以没法替别人申请，也没法冒充别的应用。
+- **只收 id_token**（`tokenType=id-token`）。access_token / refresh_token 会被 401 拒绝；refresh_token 别往外发。
+- 重复调用是安全的：已在审批中 / 已处理过的不会重复推卡片。
+
+| 返回 | 含义 |
+|---|---|
+| `200 {"status":"ok","app":...}` | 已建申请，审批卡片已推给该应用的审批人 |
+| `200 {"status":"exists",...}` | 已在审批中或已处理过，不重复推卡 |
+| `200 {"status":"approved",...}` | 该用户在 Casdoor 里已有准入组（如迁移来的老用户），让用户重新登录即可 |
+| `400` | 缺 `id_token` |
+| `401` | token 无效 / 过期 / 签名不对 / 不是 id_token |
+| `403` | 你的应用没登记到网关 `APP_CLIENT_IDS`，或该账号已停用（离职的人拿着还没过期的旧 token 也申请不了） |
+| `503` | 网关暂时拿不到 Casdoor 公钥或账号状态，稍后重试 |
+
+审批人批准后，申请人会收到飞书通知"已获批准（角色：X），重新登录即可进入"。重新走一次登录，新 token 里就带上准入组和审批时选的角色。
+
+> 第一个接入的应用（`DEFAULT_APP`，默认 cs-hub）由 Casdoor 注册 webhook 自动建申请，可以不调。
 
 ## 接入检查清单
 
 - [ ] Casdoor 注册应用（client_id/secret + 回调 URL 逐字一致）
-- [ ] 建 `approved-<应用>` 组（+ 可选角色）
+- [ ] 建 `approved-<应用>` 组（+ 可选角色，显示名填中文）
+- [ ] 管理员把 `<应用短名>:<clientId>` 加进网关 `APP_CLIENT_IDS`
 - [ ] **裁 id_token 敏感字段**
 - [ ] 抄 demo_app.py 的 `/login` + `/callback`，改 4 个环境变量
+- [ ] 未准入时把 id_token `POST` 给网关 `/request-access`（demo 设 `GATEWAY_URL` 即开启）
 - [ ] 会话短 TTL / 每请求复验（保证离职即时断权）
 - [ ]（生产）JWKS 验 id_token 签名（RS256）；回调 HTTPS

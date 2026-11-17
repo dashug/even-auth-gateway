@@ -69,15 +69,44 @@ async def _process_card(data) -> None:
     operator_id = operator.open_id if operator else ""
     # 老卡片(升级前发出、还没批的)没有 app 字段 —— 兜底到 default_app() 保持向后兼容。
     app = value.get("app") or settings.default_app()
+    applicant = value.get("sso_open_id", "")
     async with httpx.AsyncClient(base_url=settings.casdoor_endpoint()) as client:
-        await decision.handle(
+        result = await decision.handle(
             value.get("action", ""),
             operator_id=operator_id,
             owner=settings.approver_for(app),
-            sso_open_id=value.get("sso_open_id", ""),
+            sso_open_id=applicant,
             app=app,
             client=client,
+            role=value.get("role") or "",   # 审批即赋角:"批准为「X」"按钮带角色名;老卡片/无角色应用没有
         )
+    await _notify_decision(operator_id, applicant, app, result or {})
+
+
+async def _notify_decision(operator_id: str, applicant: str, app: str, result: dict) -> None:
+    """卡片回调只能先回一个"处理中…"toast,真实结果在这里补发:
+    - 点击人:总是收到结果 —— 尤其 Casdoor 加组失败,否则审批人以为批过了、申请人永远卡在待审批;
+    - 申请人:仅在真正批准/拒绝时通知(F-5.3.4 结果对申请人可见),幂等重复点击不重发。
+    通知尽力而为,失败只记日志,不影响已落库的审批结果。"""
+    from even_auth_gov.feishu import send_text
+
+    ok = result.get("status") == "ok"
+    if operator_id:
+        try:
+            await send_text(operator_id, f"{'✅' if ok else '⚠️'} [{app}] {result.get('message', '')}")
+        except Exception as e:
+            logger.warning("审批结果回告审批人失败 %s: %s", operator_id, e)
+    role = result.get("role", "")
+    texts = {
+        "approved": f"✅ 你申请接入「{app}」已获批准{f'(角色:{role})' if role else ''},重新登录即可进入。",
+        "denied": f"你申请接入「{app}」未获批准。如有疑问请联系该应用的审批人。",
+    }
+    text = texts.get(result.get("decision", ""))
+    if text and applicant:
+        try:
+            await send_text(applicant, text)
+        except Exception as e:
+            logger.warning("审批结果通知申请人失败 %s: %s", applicant, e)
 
 
 def _on_card(data):
@@ -238,6 +267,11 @@ def start_ws(main_loop: asyncio.AbstractEventLoop) -> None:
     _ws_thread = t
     t.start()
     logger.info("Feishu WebSocket client thread started (offboarding events + card callback)")
+
+
+def is_running() -> bool:
+    """WS 后台线程是否在跑(/healthz 用;断线重连的退避期间线程仍在,也算 running)。"""
+    return _ws_thread is not None and _ws_thread.is_alive()
 
 
 def stop_ws() -> None:

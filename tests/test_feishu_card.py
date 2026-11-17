@@ -1,0 +1,38 @@
+import json
+from even_auth_gov.feishu import build_sso_approval_card
+
+
+def test_card_names_the_app_instead_of_hardcoded_admin_backend():
+    """原文案写死 cs-hub 的"后台登录申请/进入管理后台",接第二个应用后对审批人是误导。"""
+    card = build_sso_approval_card("ou_x", "张三", "z@e.com", "finance")
+    text = json.dumps(card, ensure_ascii=False)
+    assert "管理后台" not in text and "后台登录" not in text
+    assert "finance" in card["header"]["title"]["content"]
+
+
+def test_card_buttons_carry_applicant_and_app():
+    card = build_sso_approval_card("ou_x", "张三", "", "finance")
+    buttons = card["elements"][-1]["actions"]
+    assert [b["value"]["action"] for b in buttons] == ["sso_approve", "sso_deny"]
+    assert all(b["value"]["sso_open_id"] == "ou_x" and b["value"]["app"] == "finance" for b in buttons)
+
+
+ROLES = [{"name": "finance-accountant", "display": "会计"}, {"name": "finance-cashier", "display": "出纳"}]
+
+
+def test_card_with_roles_has_one_approve_button_per_role_plus_deny():
+    """审批即赋角:一个角色一个"批准为「X」"按钮,点一下 = 批准 + 定角色。"""
+    card = build_sso_approval_card("ou_x", "张三", "", "finance", roles=ROLES)
+    buttons = card["elements"][-1]["actions"]
+    assert [b["value"]["action"] for b in buttons] == ["sso_approve", "sso_approve", "sso_deny"]
+    assert [b["value"].get("role") for b in buttons] == ["finance-accountant", "finance-cashier", None]
+    assert [b["text"]["content"] for b in buttons[:2]] == ["批准为「会计」", "批准为「出纳」"]
+    assert all(b["value"]["sso_open_id"] == "ou_x" and b["value"]["app"] == "finance" for b in buttons)
+    assert "选择角色" in card["elements"][0]["content"]
+
+
+def test_card_without_roles_has_no_role_in_values():
+    card = build_sso_approval_card("ou_x", "张三", "", "finance", roles=[])
+    buttons = card["elements"][-1]["actions"]
+    assert [b["text"]["content"] for b in buttons] == ["批准 ✅", "拒绝"]
+    assert all("role" not in b["value"] for b in buttons)

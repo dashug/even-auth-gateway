@@ -137,7 +137,7 @@ def test_process_card_extracts_app_and_uses_its_approver(monkeypatch):
 
     captured = {}
 
-    async def fake_handle(action, operator_id, owner, sso_open_id, app, client):
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
         captured.update(action=action, operator_id=operator_id, owner=owner, sso_open_id=sso_open_id, app=app)
         return {"status": "ok"}
 
@@ -158,7 +158,7 @@ def test_process_card_defaults_app_for_old_cards_without_app_field(monkeypatch):
 
     captured = {}
 
-    async def fake_handle(action, operator_id, owner, sso_open_id, app, client):
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
         captured["app"] = app
         return {"status": "ok"}
 
@@ -170,3 +170,93 @@ def test_process_card_defaults_app_for_old_cards_without_app_field(monkeypatch):
     asyncio.run(feishu_ws._process_card(data))
 
     assert captured["app"] == "cs-hub"
+
+
+# ── 审批结果回告:审批人收到处理结果(尤其失败),申请人收到批准/拒绝通知 ──
+
+def _capture_texts(monkeypatch):
+    sent = []
+    async def fake_send_text(receive_id, text, receive_id_type="open_id"):
+        sent.append((receive_id, text)); return True
+    monkeypatch.setattr("even_auth_gov.feishu.send_text", fake_send_text)
+    return sent
+
+
+def test_process_card_approve_notifies_approver_and_applicant(monkeypatch):
+    from even_auth_gov import decision
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "ok", "message": "已批准: X", "decision": "approved"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    sent = _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"})))
+
+    to = {rid: text for rid, text in sent}
+    assert "已批准" in to["ou_boss"] and "app-b" in to["ou_boss"]
+    assert "app-b" in to["ou_x"] and "批准" in to["ou_x"]
+
+
+def test_process_card_failure_alerts_approver_only(monkeypatch):
+    """Casdoor 加组失败:审批人必须知道(否则以为已批),申请人不该收到任何结果。"""
+    from even_auth_gov import decision
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "error", "message": "Casdoor 加组失败,请重试"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    sent = _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"})))
+
+    assert [rid for rid, _ in sent] == ["ou_boss"]
+    assert "加组失败" in sent[0][1]
+
+
+def test_process_card_idempotent_click_does_not_renotify_applicant(monkeypatch):
+    from even_auth_gov import decision
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "ok", "message": "已处理过: approved"}   # 无 decision 字段
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    sent = _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"})))
+
+    assert [rid for rid, _ in sent] == ["ou_boss"]
+
+
+# ── 审批即赋角:按钮 value 里的 role 透传给 decision,批准通知告诉申请人角色 ──
+
+def test_process_card_passes_role_from_button_to_decision(monkeypatch):
+    from even_auth_gov import decision
+
+    captured = {}
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        captured["role"] = role
+        return {"status": "ok"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data(
+        {"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b", "role": "app-b-editor"})))
+    assert captured["role"] == "app-b-editor"
+
+
+def test_approved_with_role_tells_applicant_the_role(monkeypatch):
+    from even_auth_gov import decision
+
+    async def fake_handle(action, operator_id, owner, sso_open_id, app, client, role=""):
+        return {"status": "ok", "message": "已批准 X(角色:编辑者)", "decision": "approved", "role": "编辑者"}
+
+    monkeypatch.setattr(decision, "handle", fake_handle)
+    monkeypatch.setenv("APPROVER_APP_B", "ou_boss")
+    sent = _capture_texts(monkeypatch)
+    asyncio.run(feishu_ws._process_card(_card_data(
+        {"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b", "role": "app-b-editor"})))
+    to = {rid: text for rid, text in sent}
+    assert "编辑者" in to["ou_x"] and "app-b" in to["ou_x"]

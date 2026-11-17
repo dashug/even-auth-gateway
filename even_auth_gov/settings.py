@@ -20,6 +20,31 @@ def approver_for(app: str) -> str:
     return os.getenv(env_name, "") or approver_feishu_id()
 
 
+def app_clients() -> dict[str, str]:
+    """登记可以调 /request-access 的接入应用:APP_CLIENT_IDS="cs-hub:<client_id>,finance:<client_id>"
+    → {client_id: app}。id_token 的 aud(= 该应用在 Casdoor 的 client_id)据此映射到应用名;
+    没登记的应用一律拒绝(fail-closed)。"""
+    out: dict[str, str] = {}
+    for item in os.getenv("APP_CLIENT_IDS", "").split(","):
+        app, sep, cid = item.strip().partition(":")
+        if sep and app.strip() and cid.strip():
+            out[cid.strip()] = app.strip()
+    return out
+
+
+def known_apps() -> set[str]:
+    """网关知道的全部应用名(登记的接入应用 + 默认应用)。按 `<app>-` 前缀筛角色时用来排除
+    名字更长的兄弟应用(如 app `cs` 不应认领 `cs-hub-operator`)。"""
+    return set(app_clients().values()) | {default_app()}
+
+
+def casdoor_issuer() -> str:
+    """id_token 的 iss 期望值(Casdoor 对外地址,如 https://auth.example.com)。
+    Casdoor 按签发请求的 Host 填 iss,网关走内网地址访问 Casdoor,所以不能拿 CASDOOR_ENDPOINT 比对;
+    留空则不校验 iss(签名已由 Casdoor JWKS 保证)。"""
+    return os.getenv("CASDOOR_ISSUER", "").strip()
+
+
 def casdoor_endpoint() -> str:
     return os.getenv("CASDOOR_ENDPOINT", "http://127.0.0.1:8000")
 

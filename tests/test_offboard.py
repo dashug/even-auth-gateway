@@ -15,9 +15,9 @@ def _setup(monkeypatch, tmp_path, disable_ok=True, app="app-a"):
     approval_store.mark_pending("ou_l", app, {"name": "离职者"}); approval_store.mark_approved("ou_l", app, "ou_boss")
     calls = []
     async def fake_disable(client, user_id): calls.append(("disable", user_id)); return disable_ok
-    async def fake_remove(client, user_id, group): calls.append(("remove", user_id, group)); return True
+    async def fake_remove_all(client, user_id): calls.append(("remove_approved", user_id)); return True
     monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
-    monkeypatch.setattr(offboard.ca, "remove_from_group", fake_remove)
+    monkeypatch.setattr(offboard.ca, "remove_approved_groups", fake_remove_all)
     return calls
 
 def test_flag_helper():
@@ -34,7 +34,7 @@ def test_apply_disables_and_records(monkeypatch, tmp_path):
     assert ("disable", "ou_l") in calls
     assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
     assert approval_store.get("ou_l", "app-a")["disabled_reason"] == "offboard_event"
-    assert ("remove", "ou_l", "approved-app-a") in calls   # 按该 app 的准入组移组
+    assert ("remove_approved", "ou_l") in calls   # 清掉 Casdoor 上全部 approved-* 准入组
 
 def test_apply_always_attempts_disable_even_if_locally_disabled(monkeypatch, tmp_path):
     # #14 修复:不信本地 store。本地记 disabled 但用户可能被人工在 Casdoor 重启用 → 仍幂等禁用一次,不盲跳。
@@ -69,9 +69,9 @@ def test_apply_disable_retries_then_succeeds(monkeypatch, tmp_path):
     approval_store.mark_pending("ou_l", "app-a", {"name": "x"}); approval_store.mark_approved("ou_l", "app-a", "b")
     seq = [False, True]
     async def flaky(client, user_id): return seq.pop(0)
-    async def fake_remove(client, user_id, group): return True
+    async def fake_remove_all(client, user_id): return True
     monkeypatch.setattr(offboard.ca, "disable_user", flaky)
-    monkeypatch.setattr(offboard.ca, "remove_from_group", fake_remove)
+    monkeypatch.setattr(offboard.ca, "remove_approved_groups", fake_remove_all)
     ok = asyncio.run(offboard.apply("ou_l", "x", "r", client=None))
     assert ok is True
     assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
@@ -79,44 +79,38 @@ def test_apply_disable_retries_then_succeeds(monkeypatch, tmp_path):
 
 # ── APP-AWARE (design-review #2/#16): offboarding is per-user, not per-app ──
 
-def test_apply_user_approved_for_two_apps_disables_user_once_marks_both_removes_both_groups(monkeypatch, tmp_path):
-    """离职是按用户的:Casdoor disable_user 只调一次(禁用整个账号),但两个 app 的
-    approval_store 记录都要转 disabled,两个 app 的准入组都要尝试移除。"""
+def test_apply_user_approved_for_two_apps_disables_once_removes_groups_once_marks_both(monkeypatch, tmp_path):
+    """离职是按用户的:Casdoor disable_user 只调一次(禁用整个账号),准入组一次清完
+    (remove_approved_groups 覆盖所有 approved-*),两个 app 的 approval_store 记录都转 disabled。"""
     monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
     approval_store.mark_pending("ou_l", "app-a", {"name": "离职者"}); approval_store.mark_approved("ou_l", "app-a", "b")
     approval_store.mark_pending("ou_l", "app-b", {"name": "离职者"}); approval_store.mark_approved("ou_l", "app-b", "b")
     calls = []
     async def fake_disable(client, user_id): calls.append(("disable", user_id)); return True
-    async def fake_remove(client, user_id, group): calls.append(("remove", user_id, group)); return True
+    async def fake_remove_all(client, user_id): calls.append(("remove_approved", user_id)); return True
     monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
-    monkeypatch.setattr(offboard.ca, "remove_from_group", fake_remove)
+    monkeypatch.setattr(offboard.ca, "remove_approved_groups", fake_remove_all)
     ok = asyncio.run(offboard.apply("ou_l", "离职者", "offboard_event", client=None))
     assert ok is True
-    assert sum(1 for c in calls if c[0] == "disable") == 1   # Casdoor 账号只禁用一次
-    removed_groups = {c[2] for c in calls if c[0] == "remove"}
-    assert removed_groups == {"approved-app-a", "approved-app-b"}   # 两个 app 的组都移除
+    assert calls == [("disable", "ou_l"), ("remove_approved", "ou_l")]   # 各一次,先禁用再移组
     assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
     assert approval_store.get("ou_l", "app-b")["status"] == "disabled"
 
-def test_apply_remove_from_group_failure_for_one_app_does_not_block_the_other(monkeypatch, tmp_path):
-    """移组是尽力而为(非致命);其中一个 app 的移组失败,不该影响另一个 app 的移组或最终禁用结果。"""
-    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
-    approval_store.mark_pending("ou_l", "app-a", {"name": "离职者"}); approval_store.mark_approved("ou_l", "app-a", "b")
-    approval_store.mark_pending("ou_l", "app-b", {"name": "离职者"}); approval_store.mark_approved("ou_l", "app-b", "b")
-    calls = []
-    async def fake_disable(client, user_id): return True
-    async def flaky_remove(client, user_id, group):
-        calls.append(group)
-        if group == "approved-app-a":
-            raise RuntimeError("casdoor down")
-        return True
-    monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
-    monkeypatch.setattr(offboard.ca, "remove_from_group", flaky_remove)
-    ok = asyncio.run(offboard.apply("ou_l", "离职者", "offboard_event", client=None))
-    assert ok is True
-    assert set(calls) == {"approved-app-a", "approved-app-b"}
-    assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
-    assert approval_store.get("ou_l", "app-b")["status"] == "disabled"
+def test_apply_group_removal_failure_is_non_fatal(monkeypatch, tmp_path):
+    """移组是尽力而为:禁用已挡住登录,移组抛异常/返回 False 都不影响禁用结果与记录。"""
+    for remove_behaviour in ("raise", "false"):
+        monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / f"{remove_behaviour}.json"))
+        approval_store.mark_pending("ou_l", "app-a", {"name": "离职者"}); approval_store.mark_approved("ou_l", "app-a", "b")
+        async def fake_disable(client, user_id): return True
+        async def bad_remove(client, user_id, _b=remove_behaviour):
+            if _b == "raise":
+                raise RuntimeError("casdoor down")
+            return False
+        monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
+        monkeypatch.setattr(offboard.ca, "remove_approved_groups", bad_remove)
+        ok = asyncio.run(offboard.apply("ou_l", "离职者", "offboard_event", client=None))
+        assert ok is True
+        assert approval_store.get("ou_l", "app-a")["status"] == "disabled"
 
 def test_apply_disable_failed_marks_all_app_records(monkeypatch, tmp_path):
     """#4 兜底:禁用重试用尽仍失败时,该用户名下所有 app 记录都标 disable_failed(而不只是一个)。"""
@@ -130,3 +124,17 @@ def test_apply_disable_failed_marks_all_app_records(monkeypatch, tmp_path):
     assert ok is False
     assert approval_store.get("ou_l", "app-a")["status"] == "disable_failed"
     assert approval_store.get("ou_l", "app-b")["status"] == "disable_failed"
+
+
+def test_apply_removes_casdoor_approved_groups_even_without_local_record(monkeypatch, tmp_path):
+    """迁移/手工授权的用户本地没有审批记录,但 Casdoor 组里有 —— 离职也必须清掉其准入组,
+    否则账号被重新启用时会绕过审批直接恢复访问,且每日对账会反复命中他。"""
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    calls = []
+    async def fake_disable(client, user_id): calls.append(("disable", user_id)); return True
+    async def fake_remove_all(client, user_id): calls.append(("remove_approved", user_id)); return True
+    monkeypatch.setattr(offboard.ca, "disable_user", fake_disable)
+    monkeypatch.setattr(offboard.ca, "remove_approved_groups", fake_remove_all)
+    ok = asyncio.run(offboard.apply("ou_migrated", "老用户", "reconcile", client=None))
+    assert ok is True
+    assert ("remove_approved", "ou_migrated") in calls

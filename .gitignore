@@ -9,3 +9,4 @@ data/
 # 密钥与备份绝不入库
 deploy/casdoor/.env
 deploy/casdoor/backups/
+deploy/casdoor/gov.env
