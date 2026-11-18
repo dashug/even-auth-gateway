@@ -67,6 +67,18 @@ async def _process_card(data) -> None:
         value = {}
 
     operator_id = operator.open_id if operator else ""
+    if str(value.get("action", "")).startswith("acct_"):
+        # 里程碑 4a:受管账号卡片(负责人确认 / 续期)不走应用审批。
+        from even_auth_gov import account_lifecycle
+        from even_auth_gov.feishu import send_text
+        async with httpx.AsyncClient(base_url=settings.casdoor_endpoint()) as client:
+            msg = await account_lifecycle.handle_action(value["action"], operator_id, value.get("account_id", ""), client)
+        if operator_id:
+            try:
+                await send_text(operator_id, f"👤 {msg}")
+            except Exception as e:
+                logger.warning("账号操作结果回告失败 %s: %s", operator_id, e)
+        return
     # 老卡片(升级前发出、还没批的)没有 app 字段 —— 兜底到 default_app() 保持向后兼容。
     app = value.get("app") or settings.default_app()
     applicant = value.get("sso_open_id", "")

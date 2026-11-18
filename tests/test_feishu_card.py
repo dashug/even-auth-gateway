@@ -62,3 +62,12 @@ def test_card_shows_identity_line_for_managed_accounts():
 def test_card_has_no_identity_line_by_default():
     card = feishu.build_sso_approval_card("ou_1", "张三", "z@p.com", "app-a")
     assert "账号类型" not in card["elements"][0]["content"]
+
+
+@pytest.mark.parametrize("mode,phrase", [("create", "建了账号"), ("register", "纳入管理"), ("transfer", "负责人改为你")])
+def test_account_confirm_card(mode, phrase):
+    card = feishu.build_account_confirm_card("x_1", "张三", "z@p.com", "外部合作方", "2027-02-01", mode=mode)
+    md = card["elements"][0]["content"]
+    assert phrase in md and "2027-02-01" in md and "张三" in md
+    assert [b["value"] for b in card["elements"][-1]["actions"]] == [
+        {"action": "acct_confirm", "account_id": "x_1"}, {"action": "acct_reject", "account_id": "x_1"}]

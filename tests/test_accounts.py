@@ -140,3 +140,36 @@ def test_gate_reasons():
     assert _gate("x_1", {**good, "isForbidden": True}) == "disabled"
     assert _gate("x_1", None) == "lookup_failed"                # 查不到
     assert _gate("x_1", None, status="error") == "lookup_failed"
+
+
+# ── 命令行 ──
+
+from tests._fake_casdoor import FakeCasdoor
+
+
+def _cli_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    monkeypatch.setenv("TESTING", "1")   # 飞书发送被抑制、返回成功
+    fc = FakeCasdoor()
+    fc.add(id="ou_boss", displayName="李四", email="boss@e.com")
+    monkeypatch.setattr("even_auth_gov.casdoor_admin.make_client", fc.client)
+    return fc
+
+
+def test_cli_create_prints_one_time_password(monkeypatch, tmp_path, capsys):
+    fc = _cli_env(monkeypatch, tmp_path)
+    exp = (acc.today() + timedelta(days=30)).isoformat()
+    code = acc.main(["create", "--kind", "partner", "--name", "张三", "--email", "z@p.com",
+                     "--sponsor", "boss@e.com", "--expires", exp])
+    out = capsys.readouterr().out
+    created = [u for u in fc.users if u.startswith("x_")]
+    assert code == 0 and len(created) == 1 and created[0] in out
+    assert "初始密码" in out and "z@p.com" in out and "确认卡片已发给负责人 李四" in out
+
+
+def test_cli_validation_error_exits_2(monkeypatch, tmp_path, capsys):
+    _cli_env(monkeypatch, tmp_path)
+    code = acc.main(["create", "--kind", "partner", "--name", "张三", "--email", "z@p.com",
+                     "--sponsor", "boss@e.com", "--expires", "2020-01-01"])
+    assert code == 2 and "早于今天" in capsys.readouterr().err

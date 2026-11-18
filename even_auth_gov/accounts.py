@@ -176,3 +176,80 @@ async def identity_of(client, user_id: str) -> str:
         return "非飞书账号(未查到登记信息)"
     sponsor = await ca.get_user(client, props(user).get(P_SPONSOR, ""))
     return describe(user, display_name(sponsor) if sponsor else "")
+
+
+# ── 管理员命令行:python -m even_auth_gov.accounts <子命令> ──
+
+def _lc():
+    from even_auth_gov import account_lifecycle   # 延迟导入:account_lifecycle 依赖本模块
+    return account_lifecycle
+
+
+async def _cmd_create(client, a) -> str:
+    r = await _lc().create(client, a.kind, a.name, a.email, a.sponsor, a.expires)
+    lines = [f"已建号(停用中,负责人确认后启用):{r['user_id']}",
+             f"登录邮箱:{r['email']}",
+             f"初始密码(只显示这一次,请线下交给对方):{r['password']}"]
+    lines.append(f"确认卡片已发给负责人 {r['sponsor']}" if r["confirm_sent"] else
+                 f"⚠️ 确认卡片发送失败,稍后运行:python -m even_auth_gov.accounts resend-confirm --user {r['email']}")
+    return "\n".join(lines)
+
+
+async def _cmd_register(client, a) -> str:
+    r = await _lc().register(client, a.user, a.kind, a.sponsor, a.expires)
+    tail = f"确认卡片已发给负责人 {r['sponsor']}" if r["confirm_sent"] else \
+        f"⚠️ 确认卡片发送失败,稍后运行 resend-confirm --user {a.user}"
+    return f"已纳管 {r['user_id']}(启停状态和已有准入不变)。{tail}"
+
+
+async def _cmd_resend(client, a) -> str:
+    return "确认卡片已重发" if await _lc().resend_confirm(client, a.user) else "⚠️ 确认卡片发送失败"
+
+
+_COMMANDS = {"create": _cmd_create, "register": _cmd_register, "resend-confirm": _cmd_resend}
+
+
+def _parser():
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m even_auth_gov.accounts",
+                                 description="受管的非飞书账号(外部合作方 / 无飞书员工 / 服务账号)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("create", help="建号(停用中,负责人确认后启用)")
+    c.add_argument("--kind", required=True, choices=sorted(KINDS))
+    c.add_argument("--name", required=True)
+    c.add_argument("--email", required=True, help="对方的邮箱,也是登录名")
+    c.add_argument("--sponsor", required=True, help="负责人的飞书邮箱")
+    c.add_argument("--expires", required=True, help="到期日 YYYY-MM-DD")
+    r = sub.add_parser("register", help="把已有的非飞书账号纳入管理(不改启停、不动已有准入)")
+    r.add_argument("--user", required=True, help="邮箱或账号 id")
+    r.add_argument("--kind", required=True, choices=sorted(KINDS))
+    r.add_argument("--sponsor", required=True, help="负责人的飞书邮箱")
+    r.add_argument("--expires", required=True, help="到期日 YYYY-MM-DD")
+    s = sub.add_parser("resend-confirm", help="重发负责人确认卡片")
+    s.add_argument("--user", required=True, help="邮箱或账号 id")
+    return ap, sub
+
+
+def main(argv: list[str] | None = None) -> int:
+    import asyncio
+    import sys
+    from even_auth_gov import casdoor_admin as ca, logging_setup
+    ap, _ = _parser()
+    args = ap.parse_args(argv)
+    logging_setup.setup()
+
+    async def go():
+        async with ca.make_client() as client:
+            return await _COMMANDS[args.cmd](client, args)
+
+    try:
+        print(asyncio.run(go()))
+    except _lc().AccountError as e:
+        print(f"失败:{e}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+    sys.exit(main())

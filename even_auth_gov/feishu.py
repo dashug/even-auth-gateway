@@ -148,3 +148,31 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
             action,
         ],
     }
+
+
+def build_account_confirm_card(user_id: str, name: str, email: str, kind_label: str, expires: str,
+                               mode: str = "create") -> dict:
+    """负责人确认卡片(里程碑 4a)。mode:create 新建 / register 纳管已有账号 / transfer 换负责人。
+    按钮 value 带 account_id,点击由 feishu_ws 转给 account_lifecycle.handle_action。"""
+    who = f"**{name}**({email},{kind_label})" if email else f"**{name}**({kind_label})"
+    intro = {
+        "create": f"管理员为 {who} 建了账号,登记你为负责人,有效期至 **{expires}**。确认后账号才会启用。",
+        "register": f"管理员把已有账号 {who} 纳入管理,登记你为负责人,有效期至 **{expires}**。",
+        "transfer": f"管理员把 {who} 的负责人改为你,有效期至 **{expires}**。确认后由你负责。",
+    }[mode]
+    duty = "你离职时这个账号会被一起停用;到期前会提醒你续期,不续期就到期自动停用。"
+    base = {"account_id": user_id}
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "👤 请确认账号负责人"}, "template": "blue"},
+        "elements": [
+            {"tag": "markdown", "content": f"{intro}\n\n{duty}"},
+            {"tag": "hr"},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "确认负责"}, "type": "primary",
+                 "value": {"action": "acct_confirm", **base}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "拒绝"}, "type": "danger",
+                 "value": {"action": "acct_reject", **base}},
+            ]},
+        ],
+    }
