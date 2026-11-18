@@ -386,3 +386,82 @@ def test_active_sponsors(env):
     env["fc"].users["ou_gone"] = {**env["fc"].users["ou_other"], "id": "ou_gone", "isForbidden": True}
     active(env, uid="x_c", sponsor="ou_gone")                   # 已停用的负责人不算(扫描会处理)
     assert run(env["fc"], lc.active_sponsors) == ["ou_boss"]
+
+
+# ── 换负责人、设密码、列表 ──
+
+def transfer(env, ref="x_a", to="other@e.com"):
+    return run(env["fc"], lambda c: lc.transfer(c, ref, to))
+
+
+def test_transfer_needs_new_sponsor_confirmation(env):
+    active(env)
+    r = transfer(env)
+    assert r["confirm_sent"] is True and env["fc"].props("x_a")["evauth_sponsor_pending"] == "ou_other"
+    to, card = env["sent"]["cards"][-1]
+    assert to == "ou_other" and "负责人改为你" in card["elements"][0]["content"]
+    assert env["fc"].props("x_a")["evauth_sponsor"] == "ou_boss"           # 确认前旧负责人有效
+    assert "只有该账号的负责人" in click(env, "acct_confirm", "ou_root", "x_a")
+    assert "已确认负责" in click(env, "acct_confirm", "ou_other", "x_a")
+    p = env["fc"].props("x_a")
+    assert p["evauth_sponsor"] == "ou_other" and "evauth_sponsor_pending" not in p
+    assert [e["event"] for e in events(env)][-2:] == ["transfer_requested", "transferred"]
+
+
+def test_new_sponsor_can_decline_transfer(env):
+    active(env)
+    transfer(env)
+    assert "负责人保持不变" in click(env, "acct_reject", "ou_other", "x_a")
+    p = env["fc"].props("x_a")
+    assert p["evauth_sponsor"] == "ou_boss" and "evauth_sponsor_pending" not in p
+
+
+def test_transfer_then_renew_restores_an_orphaned_account(env):
+    env["fc"].users["ou_boss"]["isForbidden"] = True
+    active(env)
+    sweep(env)                                                               # 负责人已停用 → 停
+    assert env["fc"].users["x_a"]["isForbidden"]
+    with pytest.raises(lc.AccountError, match="已停用"):
+        transfer(env, to="boss@e.com")
+    transfer(env)
+    assert "需要管理员续期" in click(env, "acct_confirm", "ou_other", "x_a")
+    run(env["fc"], lambda c: lc.renew(c, "x_a", actor="admin"))
+    assert env["fc"].users["x_a"]["isForbidden"] is False
+
+
+def test_transfer_refusals(env):
+    active(env)
+    with pytest.raises(lc.AccountError, match="一样"):
+        transfer(env, to="boss@e.com")
+    with pytest.raises(lc.AccountError, match="不是受管账号"):
+        transfer(env, ref="ou_other")
+
+
+def test_set_password_for_feishu_backup_login_and_service(env):
+    r = run(env["fc"], lambda c: lc.set_password(c, "boss@e.com"))
+    u = env["fc"].users["ou_boss"]
+    assert r["must_change"] is True and u["password"] == r["password"] and u["needUpdatePassword"] is True
+    active(env, uid="x_svc", evauth_kind="service")
+    r = run(env["fc"], lambda c: lc.set_password(c, "x_svc"))
+    assert r["must_change"] is False and env["fc"].users["x_svc"]["needUpdatePassword"] is False
+    log = (env["dir"] / "account_events.jsonl").read_text(encoding="utf-8")
+    assert "password_set" in log and r["password"] not in log
+
+
+def test_set_password_refusals(env):
+    env["fc"].add(id="uuid-s", email="s@x.com")
+    with pytest.raises(lc.AccountError, match="register"):
+        run(env["fc"], lambda c: lc.set_password(c, "uuid-s"))
+    active(env)
+    env["fc"].users["x_a"]["isForbidden"] = True
+    with pytest.raises(lc.AccountError, match="已停用"):
+        run(env["fc"], lambda c: lc.set_password(c, "x_a"))
+
+
+def test_list_accounts(env):
+    active(env, uid="x_a", expires=day(5))
+    r = create(env)
+    rows = run(env["fc"], lc.list_accounts)
+    assert [row["id"] for row in rows] == ["x_a", r["user_id"]]                # 按到期日排序
+    assert rows[0]["sponsor_name"] == "李四" and rows[0]["days_left"] == 5 and rows[0]["state"] == "启用/有效"
+    assert rows[1]["state"] == "停用/待确认" and rows[1]["kind"] == "外部合作方"

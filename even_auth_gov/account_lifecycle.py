@@ -1,7 +1,7 @@
 """受管账号的生命周期操作(会读写 Casdoor、发飞书)—— 里程碑 4a。
 
 建号 create、纳管 register、负责人确认/拒绝/续期按钮(handle_action)、重发确认卡片、
-到期扫描与续期提醒(sweep)、续期(renew)、负责人离职连带停用(cascade_sponsor / active_sponsors)。
+到期扫描与续期提醒(sweep)、续期(renew)、负责人离职连带停用(cascade_sponsor / active_sponsors)、换负责人(transfer)、设密码、列表。
 规则在 accounts.py;卡片样式在 feishu.py;卡片按钮由 feishu_ws 转到 handle_action。
 停用一律走 offboard.apply(重试 + 告警 + 清准入组和角色)。变更历史追加写到 account_events.jsonl,写失败只记日志。
 """
@@ -190,6 +190,9 @@ async def handle_action(action: str, operator_id: str, user_id: str, client) -> 
         return "找不到这个账号,或暂时读不到 Casdoor,请稍后再点"
     if not acc.is_managed(user):
         return "这个账号不是受管账号"
+    pending = acc.props(user).get(acc.P_SPONSOR_PENDING, "")
+    if pending and operator_id == pending and action in ("acct_confirm", "acct_reject"):
+        return await _decide_transfer(client, user, operator_id, accept=action == "acct_confirm")
     if operator_id != acc.props(user).get(acc.P_SPONSOR):
         return "只有该账号的负责人可以操作"
     if action == "acct_confirm":
@@ -414,3 +417,81 @@ async def active_sponsors(client) -> list[str]:
             if sid.startswith("ou_") and sponsor and not sponsor.get("isForbidden"):
                 out.add(sid)
     return sorted(out)
+
+
+# ── 换负责人、设密码、列表 ──
+
+async def transfer(client, ref: str, sponsor_email: str, actor: str = "admin") -> dict:
+    """换负责人:记下待确认的新负责人并给他发确认卡片;确认前旧负责人一直有效。"""
+    user = await _resolve_user(client, ref)
+    if not acc.is_managed(user):
+        raise AccountError("不是受管账号")
+    new = await _resolve_sponsor(client, sponsor_email)
+    if new["id"] == acc.props(user).get(acc.P_SPONSOR):
+        raise AccountError("新负责人和现在的一样")
+    updates = {acc.P_SPONSOR_PENDING: new["id"]}
+    if not await ca.set_properties(client, user["id"], updates):
+        raise AccountError("写入失败(Casdoor)")
+    user = {**user, "properties": _merged(user, updates)}
+    log_event("transfer_requested", user, actor, detail=new["id"])
+    sent = await send_confirm(user, mode="transfer", to=new["id"])
+    return {"user_id": user["id"], "sponsor": acc.display_name(new), "confirm_sent": sent}
+
+
+async def _decide_transfer(client, user: dict, operator_id: str, accept: bool) -> str:
+    name = acc.display_name(user)
+    if accept:
+        updates = {acc.P_SPONSOR: operator_id, acc.P_SPONSOR_PENDING: None,
+                   acc.P_CONFIRMED: acc.now_iso(), acc.P_REJECTED: None}
+    else:
+        updates = {acc.P_SPONSOR_PENDING: None}
+    if not await ca.set_properties(client, user["id"], updates):
+        return "操作失败:写入 Casdoor 失败,请稍后再点"
+    log_event("transferred" if accept else "transfer_rejected",
+              {**user, "properties": _merged(user, updates)}, operator_id)
+    if not accept:
+        return f"已拒绝负责 {name} 的账号,负责人保持不变"
+    msg = f"已确认负责 {name} 的账号"
+    return msg + ("。账号目前是停用状态,需要管理员续期后才会启用" if user.get("isForbidden") else "")
+
+
+async def set_password(client, ref: str, actor: str = "admin") -> dict:
+    """设随机密码:飞书员工的备用登录、或受管账号重置密码。服务账号不强制改密(否则 password grant 永远失败)。"""
+    user = await _resolve_user(client, ref)
+    if user.get("isForbidden"):
+        raise AccountError("账号已停用,不能设密码")
+    if not acc.is_feishu(user) and not acc.is_managed(user):
+        raise AccountError("未登记的非飞书账号,先用 register 纳管")
+    must_change = acc.props(user).get(acc.P_KIND) != "service"
+    password = new_password()
+    if not await ca.set_password(client, user["id"], password, need_update=must_change):
+        raise AccountError("设密码失败(Casdoor)")
+    log_event("password_set", user, actor)
+    return {"user_id": user["id"], "email": user.get("email", ""), "password": password, "must_change": must_change}
+
+
+LIST_COLUMNS = ["name", "email", "id", "kind", "sponsor_name", "sponsor", "expires", "days_left", "state"]
+_STATE = {"": "有效", "unconfirmed": "待确认", "rejected": "已拒绝", "expired": "已过期", "invalid_metadata": "信息不全"}
+
+
+async def list_accounts(client) -> list[dict]:
+    users = await ca.list_users(client)
+    if users is None:
+        raise AccountError("读不到 Casdoor 用户列表")
+    by_id = {u.get("id"): u for u in users}
+    on, rows = acc.today(), []
+    for user in users:
+        if not acc.is_managed(user):
+            continue
+        p = acc.props(user)
+        sponsor = by_id.get(p.get(acc.P_SPONSOR))
+        left = acc.days_left(user, on)
+        state = ("停用" if user.get("isForbidden") else "启用") + "/" + _STATE[acc.eligibility(user, on)]
+        if p.get(acc.P_SPONSOR_PENDING):
+            state += "(换负责人待确认)"
+        rows.append({"name": acc.display_name(user), "email": user.get("email", ""), "id": user.get("id", ""),
+                     "kind": acc.KINDS.get(p.get(acc.P_KIND), p.get(acc.P_KIND, "")),
+                     "sponsor_name": acc.display_name(sponsor) if sponsor else "", "sponsor": p.get(acc.P_SPONSOR, ""),
+                     "expires": p.get(acc.P_EXPIRES, ""), "days_left": "" if left is None else left, "state": state})
+    rows.sort(key=lambda r: (r["expires"], r["name"]))
+    return rows

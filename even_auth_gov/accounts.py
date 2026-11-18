@@ -212,8 +212,32 @@ async def _cmd_renew(client, a) -> str:
     return f"已续期到 {r['expires']}{tail}"
 
 
+async def _cmd_transfer(client, a) -> str:
+    r = await _lc().transfer(client, a.user, a.sponsor)
+    return (f"已发确认卡片给新负责人 {r['sponsor']},确认后生效(之前仍由原负责人负责)" if r["confirm_sent"]
+            else f"⚠️ 确认卡片发送失败,稍后运行 resend-confirm --user {a.user}")
+
+
+async def _cmd_set_password(client, a) -> str:
+    r = await _lc().set_password(client, a.user)
+    tail = "下次网页登录必须先改密码" if r["must_change"] else "服务账号,不强制改密码"
+    return f"新密码(只显示这一次,请线下交给对方):{r['password']}\n登录邮箱:{r['email']};{tail}"
+
+
+async def _cmd_list(client, a) -> str:
+    import csv
+    import io
+    lc = _lc()
+    rows = await lc.list_accounts(client)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=lc.LIST_COLUMNS)
+    w.writeheader()
+    w.writerows(rows)
+    return buf.getvalue().rstrip("\n")
+
+
 _COMMANDS = {"create": _cmd_create, "register": _cmd_register, "resend-confirm": _cmd_resend,
-             "renew": _cmd_renew}
+             "renew": _cmd_renew, "transfer": _cmd_transfer, "set-password": _cmd_set_password, "list": _cmd_list}
 
 
 def _parser():
@@ -237,6 +261,12 @@ def _parser():
     n = sub.add_parser("renew", help="续期(停用中且负责人确认过的会重新启用)")
     n.add_argument("--user", required=True, help="邮箱或账号 id")
     n.add_argument("--expires", default="", help="指定到期日 YYYY-MM-DD;不给则按 ACCOUNT_RENEW_DAYS 延长")
+    t = sub.add_parser("transfer", help="换负责人(新负责人确认后生效)")
+    t.add_argument("--user", required=True, help="邮箱或账号 id")
+    t.add_argument("--sponsor", required=True, help="新负责人的飞书邮箱")
+    p = sub.add_parser("set-password", help="设随机密码:飞书员工备用登录 / 受管账号重置密码")
+    p.add_argument("--user", required=True, help="邮箱或账号 id")
+    sub.add_parser("list", help="列出受管账号(CSV)")
     return ap, sub
 
 

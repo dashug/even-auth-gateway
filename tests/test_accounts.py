@@ -182,3 +182,20 @@ def test_cli_renew(monkeypatch, tmp_path, capsys):
     target = (acc.today() + timedelta(days=60)).isoformat()
     assert acc.main(["renew", "--user", "z@p.com", "--expires", target]) == 0
     assert fc.props("x_1")["evauth_expires"] == target and target in capsys.readouterr().out
+
+
+def test_cli_list_outputs_csv(monkeypatch, tmp_path, capsys):
+    import csv, io
+    fc = _cli_env(monkeypatch, tmp_path)
+    fc.add(id="x_1", email="z@p.com", displayName="张三", properties={"evauth_kind": "staff",
+           "evauth_sponsor": "ou_boss", "evauth_expires": (acc.today() + timedelta(days=9)).isoformat(),
+           "evauth_confirmed_at": "t"})
+    assert acc.main(["list"]) == 0
+    rows = list(csv.DictReader(io.StringIO(capsys.readouterr().out)))
+    assert rows[0]["id"] == "x_1" and rows[0]["kind"] == "内部员工(无飞书)" and rows[0]["days_left"] == "9"
+
+
+def test_cli_set_password_prints_it_once(monkeypatch, tmp_path, capsys):
+    fc = _cli_env(monkeypatch, tmp_path)
+    assert acc.main(["set-password", "--user", "boss@e.com"]) == 0
+    assert fc.users["ou_boss"]["password"] in capsys.readouterr().out
