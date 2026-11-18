@@ -263,3 +263,65 @@ async def find_user_by_email(client: httpx.AsyncClient, owner: str, email: str) 
     except Exception as e:
         logger.warning("Casdoor find_user_by_email %s error: %s", email, e)
         return None
+
+# ── 里程碑 4a:受管的非飞书账号 ──
+
+async def get_user_by_email(client: httpx.AsyncClient, email: str) -> tuple[bool, dict | None]:
+    """邮箱 → (查询是否成功, 用户对象或 None)。区分"没这个人"和"查询出错":
+    建号时的邮箱占用检查、负责人查找都要在读不到 Casdoor 时中止(实测:查不到返回 status=ok, data=null)。"""
+    try:
+        resp = await client.get("/api/get-user", params={"owner": _org(), "email": email, **_auth()}, timeout=10.0)
+        data = resp.json() if resp.content else {}
+        if resp.status_code != 200 or not isinstance(data, dict) or data.get("status") == "error":
+            logger.warning("Casdoor get-user(email=%s) failed: %s %s", email, resp.status_code, data)
+            return False, None
+        return True, (data.get("data") or None)
+    except Exception as e:
+        logger.warning("Casdoor get-user(email=%s) error: %s", email, e)
+        return False, None
+
+async def create_user(client: httpx.AsyncClient, user: dict) -> bool:
+    """add-user。user 自带 owner/name/id;实测 isForbidden、needUpdatePassword、properties 都会照写。"""
+    try:
+        resp = await client.post("/api/add-user", params=_auth(), json=user, timeout=10.0)
+        data = resp.json() if resp.content else {}
+        if resp.status_code == 200 and data.get("status") != "error":
+            return True
+        logger.warning("Casdoor add-user %s failed: %s %s", user.get("id"), resp.status_code, data)
+        return False
+    except Exception as e:
+        logger.warning("Casdoor add-user %s error: %s", user.get("id"), e)
+        return False
+
+async def set_properties(client: httpx.AsyncClient, user_id: str, updates: dict) -> bool:
+    """合并写用户 properties:值为 None 的键删除,其它转成字符串写入;原有键(如 oauth_Lark_*)保留。
+    整对象读-改-写(columns=properties 只落这一列),持 _GROUP_LOCK 防止并发改丢写。"""
+    async with _GROUP_LOCK:
+        u = await _get_by_open_id(client, user_id)
+        if u is None:
+            return False
+        merged = dict(u.get("properties") or {})
+        for key, value in updates.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = str(value)
+        u["properties"] = merged
+        return await _update_user(client, _casdoor_id(u), u, "properties")
+
+async def set_password(client: httpx.AsyncClient, user_id: str, password: str, need_update: bool) -> bool:
+    """管理员直接设密码(实测 columns=password,needUpdatePassword 生效,旧密码失效)。
+    need_update=True:下次网页登录必须先改密码;服务账号不能置(否则 password grant 永远失败)。"""
+    u = await _get_by_open_id(client, user_id)
+    if u is None:
+        return False
+    u["password"] = password
+    u["needUpdatePassword"] = bool(need_update)
+    return await _update_user(client, _casdoor_id(u), u, "password,needUpdatePassword")
+
+async def enable_user(client: httpx.AsyncClient, user_id: str) -> bool:
+    u = await _get_by_open_id(client, user_id)
+    if u is None:
+        return False
+    u["isForbidden"] = False
+    return await _update_user(client, _casdoor_id(u), u, "isForbidden")

@@ -79,6 +79,15 @@ async def handle(body: bytes, token: str) -> dict:
     open_id = user.get("id") or ""
     if not open_id:
         return {"status": "ignored"}
+    if not open_id.startswith("ou_"):
+        # 里程碑 4a 闸门:非飞书账号必须是已登记、负责人已确认、没过期、没停用的受管账号,
+        # 否则不建待批、不发卡片(防陌生人自助注册后骗批准;命令行建号的 add-user 回调也在此被挡下)。
+        from even_auth_gov import accounts, casdoor_admin as ca
+        async with ca.make_client() as client:
+            reason = await accounts.gate(client, open_id)
+        if reason:
+            logger.info("Casdoor webhook: %s 不能进审批(%s),不建待批", open_id, reason)
+            return {"status": "ignored"}
     # Casdoor signup webhook 不带 app 信息(它不知道用户是为哪个应用注册的) ——
     # 落到 default_app() 上,与现有 cs-hub 试点保持向后兼容。
     app = settings.default_app()

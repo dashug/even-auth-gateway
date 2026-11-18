@@ -113,7 +113,7 @@ curl -s http://127.0.0.1:8100/healthz        # {"status":"ok","feishu_ws":true,"
 - **Casdoor webhook**：后台 Webhooks → URL `http://even-auth-gov:8080/casdoor/webhook`（compose 内网），事件勾 `signup`，自定义头 `X-Webhook-Token: <CASDOOR_WEBHOOK_SECRET>`，勾 `isUserExtended`。
 - **接入应用调 `/request-access`**：应用把用户刚登录拿到的 id_token 交给网关，网关验 Casdoor 签名——应用不持有任何网关密钥。每接一个应用，在 `gov.env` 的 `APP_CLIENT_IDS` 加 `<应用短名>:<clientId>`；`CASDOOR_ISSUER` 填 Casdoor 对外地址（token 里的 `iss`，和内网 `http://casdoor:8000` 不同）。经 nginx 把 `8100` 反代给内网应用（与 Casdoor 同样只做 TLS 前置，不对公网开放）。契约见 `docs/integration-guide.md`「待审批」。
 - **审批时分配角色**：在 Casdoor 给应用建 `<应用短名>-<role>` 角色（显示名填中文），审批卡片自动按角色出按钮，无需改网关配置。批准时该应用只留所选角色；拒绝撤该应用角色、离职撤全部角色。建了角色的应用不允许无角色批准（角色强制）。
-- **定时任务**：每天 `SSO_RECONCILE_CRON`（默认 08:00）对账，跑完做权限核对、高/中级异常推给 `APPROVER_FEISHU_ID`；每小时 `SSO_PENDING_SWEEP_CRON` 扫一遍待批——补发没送达的卡片、催办、超时升级（`APPROVAL_ESCALATE_HOURS` / `APPROVAL_ESCALATE_TO`）。
+- **定时任务**：每天 `SSO_RECONCILE_CRON`（默认 08:00）对账，跑完做权限核对、高/中级异常推给 `APPROVER_FEISHU_ID`；每小时 `SSO_PENDING_SWEEP_CRON` 扫一遍待批——补发没送达的卡片、催办、超时升级（`APPROVAL_ESCALATE_HOURS` / `APPROVAL_ESCALATE_TO`），随后扫一遍受管账号（到期停用、续期提醒、负责人已停用）。
 - **飞书应用必须与 Casdoor Lark provider 同一个**：open_id 按飞书应用区分，否则审批卡片/在职查询拿到的 open_id 对不上 Casdoor 的 `sub`。
 - **飞书开放平台配置**（网关用到的全部飞书能力，权限名以后台添加事件/接口时的提示为准）：
   - 启用**机器人**能力：审批卡片、审批结果、离职禁用失败告警都以应用身份发消息（`im.v1.message.create`）。
@@ -136,6 +136,36 @@ curl -s http://127.0.0.1:8100/healthz        # {"status":"ok","feishu_ws":true,"
     python -m even_auth_gov.migrate_emails /tmp/admin_auth.json --dry-run
   ```
 
+### 受管的非飞书账号（里程碑 4a）
+
+外部合作方、没飞书的员工、服务账号用邮箱/密码登录。每个这样的账号都登记了**负责人（飞书员工）和到期日**；没登记、负责人没确认、已过期的过不了审批。设计见 `docs/superpowers/specs/2026-11-18-m4a-managed-accounts-design.md`。
+
+- **必须关掉 Casdoor 自助注册**：应用设置里打开 `disableSelfSignup`（禁用自助注册），**`enableSignUp` 保持开着**——飞书首次扫码的自动注册靠它，关了新员工就进不来。依据见 `docs/casdoor-findings.md` §9 S5：不关的话，注册项稍一放宽陌生人就能自助注册出可用账号（治理层闸门会拦住审批，但账号会留在 Casdoor 里）。改完验证：
+  ```bash
+  curl -s -X POST https://<casdoor>/api/signup -H 'Content-Type: application/json' \
+    -d '{"application":"<应用名>","organization":"<org>","username":"probe","password":"Probe-123456!"}'
+  # 期望:"The application does not allow to sign up new account"
+  ```
+  真实飞书联调时确认：打开后飞书新员工首次扫码仍能自动注册。
+- **密码策略**：在 Casdoor 组织设置里要求至少 12 位并含大小写、数字、符号。命令行生成的初始密码是 20 位随机串，满足这类策略；人员账号首次网页登录必须先改密码。
+- **服务账号**：用 password grant 换 token（`grant_type=password`），对接的应用要在 Casdoor 里允许 `password` 授权类型。服务账号不强制改密码（强制的话 password grant 会一直被拒）。
+- **外部合作方建议开 MFA**：Casdoor 支持 TOTP，本期未强制，按需在组织/应用上打开。
+- **运维命令**（容器里跑，前缀同上：`docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec even-auth-gov`）：
+  ```bash
+  # 建号:账号先停用,负责人在飞书点「确认负责」后启用;初始密码只打印这一次,线下交给对方
+  python -m even_auth_gov.accounts create --kind partner --name 张三 --email zhangsan@partner.com \
+    --sponsor lisi@company.com --expires 2027-02-01          # kind: partner / staff / service
+  python -m even_auth_gov.accounts register --user <邮箱或id> --kind staff --sponsor ... --expires ...  # 纳管已有的非飞书账号(不改启停、不动已有准入)
+  python -m even_auth_gov.accounts resend-confirm --user <邮箱或id>    # 确认卡片没发出去时重发
+  python -m even_auth_gov.accounts renew --user <邮箱或id> [--expires YYYY-MM-DD]   # 续期;已停用的会重新启用,之后要重新申请各应用
+  python -m even_auth_gov.accounts transfer --user <邮箱或id> --sponsor <新负责人飞书邮箱>   # 新负责人确认后生效
+  python -m even_auth_gov.accounts set-password --user <邮箱或id>      # 重置密码;对飞书员工 = 开通备用密码登录
+  python -m even_auth_gov.accounts list > accounts.csv
+  python -m even_auth_gov.audit_export --accounts > account-events.csv   # 受管账号变更历史
+  ```
+- **到期与离职**：到期前 `ACCOUNT_REMIND_DAYS`（默认 14、3 天）给负责人发续期卡片；过期后在每小时扫描里停用（停账号 + 清准入组和角色），并通知负责人。负责人离职时名下账号连带停用，汇总发给 `APPROVER_FEISHU_ID`；每日对账也会查所有负责人的在职状态。
+- 存量的非飞书账号（管理员测试号、早先手工建的服务账号）不会被自动停用，但过不了审批，核对报表里报"未登记"。需要保留的用 `register` 纳管，不需要的在 Casdoor 里删掉。
+
 ## 备份 / 恢复（务必配）
 
 **Casdoor 的 postgres 卷是唯一身份真理源——丢了它 = 丢全部用户/组/角色/应用配置。**
@@ -152,11 +182,14 @@ gunzip -c deploy/casdoor/backups/casdoor-<ts>.sql.gz \
   | docker compose -f deploy/casdoor/docker-compose.yml exec -T casdoor-db psql -U casdoor casdoor
 ```
 
-治理服务在跑时，`backup.sh` 会顺带备份审批库（`backups/approvals-<ts>.json.gz`，审批/拒绝/停用的审计留痕）。恢复：
+治理服务在跑时，`backup.sh` 会顺带备份审批库（`backups/approvals-<ts>.json.gz`，审批/拒绝/停用的审计留痕）和受管账号变更历史（`backups/account-events-<ts>.jsonl.gz`，有这个文件才备份）。恢复：
 ```
 gunzip -c deploy/casdoor/backups/approvals-<ts>.json.gz \
   | docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec -T even-auth-gov sh -c 'cat > /data/approvals.json'
+gunzip -c deploy/casdoor/backups/account-events-<ts>.jsonl.gz \
+  | docker compose -f deploy/casdoor/docker-compose.yml --profile gov exec -T even-auth-gov sh -c 'cat > /data/account_events.jsonl'
 ```
+受管账号的负责人、到期日记在 Casdoor 用户上，随 Casdoor 库一起恢复；变更历史文件丢了只丢历史。
 
 ## 单实例约束（重要）
 

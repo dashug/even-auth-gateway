@@ -139,3 +139,76 @@ def test_notify_pending_passes_recipient_and_note_through(monkeypatch, tmp_path)
     assert asyncio.run(webhook.notify_pending("ou_a", "app-a", "A")) is True
     assert seen[0]["to"] == "ou_esc" and seen[0]["note"] == "升级"
     assert "to" not in seen[1] and "note" not in seen[1]
+
+
+# ── 里程碑 4a:非飞书账号闸门 ──
+
+from datetime import timedelta
+import httpx
+from even_auth_gov import accounts
+
+
+def _casdoor_with(monkeypatch, user, status="ok"):
+    def handler(req):
+        return httpx.Response(200, json={"status": status, "data": user})
+    monkeypatch.setattr("even_auth_gov.casdoor_admin.make_client",
+                        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://casdoor"))
+
+
+def _managed_props():
+    return {"evauth_kind": "partner", "evauth_sponsor": "ou_boss",
+            "evauth_expires": (accounts.today() + timedelta(days=30)).isoformat(),
+            "evauth_confirmed_at": "2026-11-01T00:00:00+00:00"}
+
+
+def _signup(uid):
+    return json.dumps({"action": "signup", "extendedUser": {"id": uid, "name": "n", "displayName": "王总(CEO)"}}).encode()
+
+
+def test_self_signup_of_unregistered_account_gets_no_card(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _casdoor_with(monkeypatch, {"id": "uuid-1", "owner": "even-test", "name": "n", "properties": {}})
+    sent = []
+    async def fake_send(info): sent.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    r = asyncio.run(webhook.handle(_signup("uuid-1"), token="shh"))
+    assert r["status"] == "ignored" and sent == []
+    assert approval_store.get("uuid-1", "app-a") is None
+
+
+def test_unconfirmed_managed_account_creation_gets_no_card(monkeypatch, tmp_path):
+    """命令行建号可能触发 add-user webhook:账号停用中、负责人没确认 → 不发卡片。"""
+    _env(monkeypatch, tmp_path)
+    props = {k: v for k, v in _managed_props().items() if k != "evauth_confirmed_at"}
+    _casdoor_with(monkeypatch, {"id": "x_1", "owner": "even-test", "name": "x_1", "isForbidden": True, "properties": props})
+    sent = []
+    async def fake_send(info): sent.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    assert asyncio.run(webhook.handle(_signup("x_1"), token="shh"))["status"] == "ignored" and sent == []
+
+
+def test_eligible_managed_account_goes_to_approval(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _casdoor_with(monkeypatch, {"id": "x_1", "owner": "even-test", "name": "x_1", "properties": _managed_props()})
+    sent = []
+    async def fake_send(info): sent.append(info)
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    assert asyncio.run(webhook.handle(_signup("x_1"), token="shh"))["status"] == "ok"
+    assert approval_store.get("x_1", "app-a")["status"] == "pending" and len(sent) == 1
+
+
+def test_gate_fails_closed_when_casdoor_unreadable(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _casdoor_with(monkeypatch, None, status="error")
+    assert asyncio.run(webhook.handle(_signup("x_1"), token="shh"))["status"] == "ignored"
+    assert approval_store.get("x_1", "app-a") is None
+
+
+def test_feishu_signup_does_not_query_casdoor(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    def boom():
+        raise AssertionError("飞书账号不该查 Casdoor")
+    monkeypatch.setattr("even_auth_gov.casdoor_admin.make_client", boom)
+    async def fake_send(info): pass
+    monkeypatch.setattr(webhook, "send_approval_card", fake_send)
+    assert asyncio.run(webhook.handle(_signup("ou_new"), token="shh"))["status"] == "ok"

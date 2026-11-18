@@ -46,3 +46,37 @@ def test_card_note_is_shown_above_applicant_info():
     assert "申请人" in text
     plain = build_sso_approval_card("ou_a", "申请人", "a@e.com", "app-a")
     assert "⏰" not in plain["elements"][0]["content"]
+
+
+# ── 里程碑 4a ──
+
+import pytest
+from even_auth_gov import feishu
+
+def test_card_shows_identity_line_for_managed_accounts():
+    card = feishu.build_sso_approval_card("x_1", "张三", "z@p.com", "app-a",
+                                          identity="外部合作方 · 负责人 李四 · 有效期至 2027-02-01")
+    assert "**账号类型:** 外部合作方 · 负责人 李四 · 有效期至 2027-02-01" in card["elements"][0]["content"]
+
+
+def test_card_has_no_identity_line_by_default():
+    card = feishu.build_sso_approval_card("ou_1", "张三", "z@p.com", "app-a")
+    assert "账号类型" not in card["elements"][0]["content"]
+
+
+@pytest.mark.parametrize("mode,phrase", [("create", "建了账号"), ("register", "纳入管理"), ("transfer", "负责人改为你")])
+def test_account_confirm_card(mode, phrase):
+    card = feishu.build_account_confirm_card("x_1", "张三", "z@p.com", "外部合作方", "2027-02-01", mode=mode)
+    md = card["elements"][0]["content"]
+    assert phrase in md and "2027-02-01" in md and "张三" in md
+    assert [b["value"] for b in card["elements"][-1]["actions"]] == [
+        {"action": "acct_confirm", "account_id": "x_1"}, {"action": "acct_reject", "account_id": "x_1"}]
+
+
+def test_account_renew_card():
+    card = feishu.build_account_renew_card("x_1", "张三", "外部合作方", "2027-02-01", 3, 90)
+    md = card["elements"][0]["content"]
+    assert "2027-02-01" in md and "3 天后" in md and "90 天" in md
+    assert [b["value"] for b in card["elements"][-1]["actions"]] == [
+        {"action": "acct_renew", "account_id": "x_1"}, {"action": "acct_no_renew", "account_id": "x_1"}]
+    assert "今天" in feishu.build_account_renew_card("x_1", "张三", "外部合作方", "2027-02-01", 0, 90)["elements"][0]["content"]

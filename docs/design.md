@@ -17,6 +17,9 @@
 > | （新增，里程碑 3）角色强制 | 分了角色的应用不许"有准入没角色"：无角色批准被拒并重发带角色卡片；迁移 `--role`；应用侧兜底拒绝 |
 > | （新增，里程碑 3）审批超时升级 | 审批人第一次收到卡片后超 `APPROVAL_ESCALATE_HOURS` 未处理 → 卡片升级给 `APPROVAL_ESCALATE_TO`，两人谁先点算谁；每小时待批扫描 |
 > | （新增，里程碑 3）权限视图 / 撤权核对 | `access_report`：以 Casdoor 组/角色/账号状态为准合上审批库，导出"人 × 应用"表与异常清单；每日对账后推送高/中级异常 |
+> | （新增，里程碑 4a）受管的非飞书账号 | 外部合作方 / 无飞书员工 / 服务账号用邮箱密码登录，必须登记负责人 + 到期日（Casdoor 用户 `properties` 的 `evauth_*`）；只能管理员建号、负责人确认后启用（`accounts.py` / `account_lifecycle.py`；设计见本仓库 `docs/superpowers/specs/2026-11-18-m4a-managed-accounts-design.md`） |
+> | （新增，里程碑 4a）审批闸门 | 非飞书账号没登记 / 负责人没确认 / 已过期 → signup webhook 不建申请、`/request-access` 403、批准时系统拒绝；顺带堵住"陌生人自助注册后骗批准"。部署要求 Casdoor 应用打开 `disableSelfSignup` |
+> | （新增，里程碑 4a）到期与负责人离职 | 到期前提醒负责人续期，过期按离职流程停用；负责人离职连带停用名下账号，每日对账纳入负责人；续期后要重新申请各应用 |
 >
 > 文中 `docs/superpowers/specs/...` 路径指 even-cs-hub 仓库内的文档。
 前置：选型调研（buy-on-Casdoor，见对话记录）+ 已完成的 CS Hub 飞书 SSO（`docs/superpowers/specs/2026-07-03-feishu-sso-design.md`）

@@ -321,3 +321,91 @@ def test_remove_roles_unknown_user_or_list_error_is_false(monkeypatch):
     h, updates = _mutable_roles_handler([_role("app-a-viewer", users=[ME])], user=_user_obj(), list_ok=False)
     assert asyncio.run(ca.remove_roles(_client(h), OPEN_ID)) is False
     assert updates == []
+
+
+# ── 里程碑 4a:受管账号用到的写操作 ──
+
+def _email_handler(seen, data=None, status="ok"):
+    def handler(req):
+        seen.setdefault("params", []).append(dict(req.url.params))
+        return httpx.Response(200, json={"status": status, "data": data})
+    return handler
+
+
+def test_get_user_by_email_distinguishes_missing_from_error(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    seen = {}
+    found = {"id": "x_1", "email": "a@p.com"}
+    async def run(handler):
+        async with _client(handler) as c:
+            return await ca.get_user_by_email(c, "a@p.com")
+    assert asyncio.run(run(_email_handler(seen, data=found))) == (True, found)
+    assert seen["params"][0]["email"] == "a@p.com" and seen["params"][0]["owner"] == "even-test"
+    assert asyncio.run(run(_email_handler(seen, data=None))) == (True, None)          # 没这个人
+    assert asyncio.run(run(_email_handler(seen, status="error"))) == (False, None)   # 查询出错
+
+
+def test_create_user_posts_add_user(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    monkeypatch.setenv("CASDOOR_CLIENT_ID", "cid")
+    seen = {}
+    def handler(req):
+        seen["path"], seen["params"], seen["body"] = req.url.path, dict(req.url.params), json.loads(req.content)
+        return httpx.Response(200, json={"status": "ok", "data": "Affected"})
+    async def run():
+        async with _client(handler) as c:
+            return await ca.create_user(c, {"owner": "even-test", "name": "x_1", "id": "x_1", "isForbidden": True})
+    assert asyncio.run(run()) is True
+    assert seen["path"] == "/api/add-user" and seen["params"]["clientId"] == "cid"
+    assert seen["body"]["isForbidden"] is True
+
+
+def test_create_user_failure_returns_false(monkeypatch):
+    def handler(req):
+        return httpx.Response(200, json={"status": "error", "msg": "dup"})
+    async def run():
+        async with _client(handler) as c:
+            return await ca.create_user(c, {"id": "x_1"})
+    assert asyncio.run(run()) is False
+
+
+def test_set_properties_merges_and_deletes(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    seen = {}
+    user = {**_user_obj(), "properties": {"oauth_Lark_id": "ou_feishu123", "evauth_reminded": "x"}}
+    async def run():
+        async with _client(_handler_factory(seen, user=user)) as c:
+            return await ca.set_properties(c, OPEN_ID, {"evauth_kind": "partner", "evauth_reminded": None})
+    assert asyncio.run(run()) is True
+    assert seen["upd_columns"] == "properties"
+    assert seen["upd_body"]["properties"] == {"oauth_Lark_id": "ou_feishu123", "evauth_kind": "partner"}
+
+
+def test_set_password_writes_both_columns(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    seen = {}
+    async def run():
+        async with _client(_handler_factory(seen, user=_user_obj())) as c:
+            return await ca.set_password(c, OPEN_ID, "Pw-123456!", need_update=True)
+    assert asyncio.run(run()) is True
+    assert seen["upd_columns"] == "password,needUpdatePassword"
+    assert seen["upd_body"]["password"] == "Pw-123456!" and seen["upd_body"]["needUpdatePassword"] is True
+
+
+def test_enable_user(monkeypatch):
+    monkeypatch.setenv("CASDOOR_ORG", "even-test")
+    seen = {}
+    async def run():
+        async with _client(_handler_factory(seen, user=_user_obj(isForbidden=True))) as c:
+            return await ca.enable_user(c, OPEN_ID)
+    assert asyncio.run(run()) is True
+    assert seen["upd_columns"] == "isForbidden" and seen["upd_body"]["isForbidden"] is False
+
+
+def test_writes_fail_when_user_missing(monkeypatch):
+    seen = {}
+    async def run():
+        async with _client(_handler_factory(seen, user=None)) as c:
+            return (await ca.set_properties(c, "x_none", {"a": "b"}), await ca.set_password(c, "x_none", "p", False),
+                    await ca.enable_user(c, "x_none"))
+    assert asyncio.run(run()) == (False, False, False)

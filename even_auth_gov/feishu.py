@@ -84,7 +84,7 @@ async def send_card(receive_id: str, card: dict, receive_id_type: str = "open_id
 
 
 def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "",
-                            roles: list[dict] | None = None, note: str = "") -> dict:
+                            roles: list[dict] | None = None, note: str = "", identity: str = "") -> dict:
     """Build the admin-approval card for a Feishu SSO login application.
 
     `app` identifies which downstream application this applicant is requesting
@@ -99,9 +99,12 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
     没有则保持单个"批准"按钮。
 
     `note`:卡片顶部的一行说明(如超时升级"已等待 N 小时未处理"),没有则不显示。
+
+    `identity`(里程碑 4a):非飞书受管账号的身份行(类型 · 负责人 · 有效期),飞书账号为空、不显示。
     """
     note_line = f"⏰ {note}\n\n" if note else ""
     email_line = f"\n**企业邮箱:** {email}" if email else ""
+    identity_line = f"\n**账号类型:** {identity}" if identity else ""
     app_line = f"\n**申请接入应用:** {app}" if app else ""
     title = f"🔐 {app} 接入申请" if app else "🔐 应用接入申请"
     base = {"sso_open_id": open_id, "app": app}
@@ -140,8 +143,59 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
             "template": "orange",
         },
         "elements": [
-            {"tag": "markdown", "content": f"{note_line}**申请人:** {name}{email_line}{app_line}\n\n{hint}"},
+            {"tag": "markdown", "content": f"{note_line}**申请人:** {name}{email_line}{identity_line}{app_line}\n\n{hint}"},
             {"tag": "hr"},
             action,
+        ],
+    }
+
+
+def build_account_confirm_card(user_id: str, name: str, email: str, kind_label: str, expires: str,
+                               mode: str = "create") -> dict:
+    """负责人确认卡片(里程碑 4a)。mode:create 新建 / register 纳管已有账号 / transfer 换负责人。
+    按钮 value 带 account_id,点击由 feishu_ws 转给 account_lifecycle.handle_action。"""
+    who = f"**{name}**({email},{kind_label})" if email else f"**{name}**({kind_label})"
+    intro = {
+        "create": f"管理员为 {who} 建了账号,登记你为负责人,有效期至 **{expires}**。确认后账号才会启用。",
+        "register": f"管理员把已有账号 {who} 纳入管理,登记你为负责人,有效期至 **{expires}**。",
+        "transfer": f"管理员把 {who} 的负责人改为你,有效期至 **{expires}**。确认后由你负责。",
+    }[mode]
+    duty = "你离职时这个账号会被一起停用;到期前会提醒你续期,不续期就到期自动停用。"
+    base = {"account_id": user_id}
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "👤 请确认账号负责人"}, "template": "blue"},
+        "elements": [
+            {"tag": "markdown", "content": f"{intro}\n\n{duty}"},
+            {"tag": "hr"},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "确认负责"}, "type": "primary",
+                 "value": {"action": "acct_confirm", **base}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "拒绝"}, "type": "danger",
+                 "value": {"action": "acct_reject", **base}},
+            ]},
+        ],
+    }
+
+
+def build_account_renew_card(user_id: str, name: str, kind_label: str, expires: str, days_left: int,
+                             renew_days: int) -> dict:
+    """到期前给负责人的续期提醒卡片(里程碑 4a)。"""
+    when = "今天" if days_left == 0 else f"{days_left} 天后"
+    text = (f"**{name}**({kind_label})的账号将于 **{expires}** 到期({when})。\n\n"
+            f"续期后有效期延长 {renew_days} 天;不续期就到期自动停用,之后对方要重新申请各应用。")
+    base = {"account_id": user_id}
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "⏳ 账号即将到期"}, "template": "yellow"},
+        "elements": [
+            {"tag": "markdown", "content": text},
+            {"tag": "hr"},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": f"续期 {renew_days} 天"},
+                 "type": "primary", "value": {"action": "acct_renew", **base}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "不再续期"},
+                 "type": "default", "value": {"action": "acct_no_renew", **base}},
+            ]},
         ],
     }

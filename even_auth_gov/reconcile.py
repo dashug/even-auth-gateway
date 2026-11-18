@@ -130,16 +130,25 @@ async def sweep_pending() -> None:
 async def run(client) -> None:
     # 0) 待审批补发/催办/超时升级(调度器另有每小时一次的同一扫描)。
     await sweep_pending()
+    # 0b) 受管账号扫描(里程碑 4a:到期 / 负责人已停用;每小时任务也跑,内部有锁)。
+    from even_auth_gov import account_lifecycle
+    try:
+        await account_lifecycle.sweep(client)
+    except Exception as e:
+        logger.warning("Reconcile: 受管账号扫描失败: %s", e)
     # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
     # 离职是按用户的 —— 同一用户可能在多个 app 记录上都是 disable_failed,去重后只重试一次。
     for open_id in _distinct_open_ids_by_status("disable_failed"):
         logger.info("Reconcile: 重试上次禁用失败的 %s", open_id)
         await offboard.apply(open_id, "", "reconcile-retry", client)
-    # 2) 常规对账:检查集 = 本地 approved 用户 ∪ Casdoor 任一 approved-* 组的飞书成员。
+    # 2) 常规对账:检查集 = 本地 approved 用户 ∪ Casdoor 任一 approved-* 组的飞书成员 ∪ 受管账号的负责人。
     # #8:直接加进 Casdoor 组、绕过本地审批库的用户(迁移/手工授权)也要被对账,否则永远漏掉。
     # 去重后每人只查一次飞书、departed 时只 offboard 一次(offboard.apply 按用户禁用)。
+    # 里程碑 4a:负责人可能自己不用任何应用,但离职了名下受管账号要跟着停,所以也要查他的在职状态。
     from even_auth_gov import casdoor_admin
-    check_ids = set(_distinct_open_ids_by_status("approved")) | set(await casdoor_admin.list_approved_feishu_members(client))
+    check_ids = (set(_distinct_open_ids_by_status("approved"))
+                 | set(await casdoor_admin.list_approved_feishu_members(client))
+                 | set(await account_lifecycle.active_sponsors(client)))
     for open_id in sorted(check_ids):
         try:
             status = await fetch_feishu_status(open_id)

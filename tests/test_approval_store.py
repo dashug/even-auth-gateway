@@ -139,3 +139,28 @@ def test_first_notified_at_is_kept_across_reminders(monkeypatch, tmp_path):
     s.mark_notified("ou_x", "app-a")
     rec = s.get("ou_x", "app-a")
     assert rec["first_notified_at"] == first and rec["notified_at"] != "2000-01-01T00:00:00+00:00"
+
+
+def test_mark_denied_records_reason_only_when_given(monkeypatch, tmp_path):
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("x_1", "app-a", {"name": "张三"})
+    s.mark_denied("x_1", "app-a", "system", reason="ineligible:unregistered")
+    rec = s.get("x_1", "app-a")
+    assert rec["status"] == "denied" and rec["denied_by"] == "system" and rec["denied_reason"] == "ineligible:unregistered"
+    s.mark_pending("ou_b", "app-a", {"name": "b"})
+    s.mark_denied("ou_b", "app-a", "ou_boss")
+    assert "denied_reason" not in s.get("ou_b", "app-a")
+
+
+def test_reopen_after_renewal_only_flips_lifecycle_disables(monkeypatch, tmp_path):
+    s = _store(monkeypatch, tmp_path)
+    for app in ("app-a", "app-b", "app-c"):
+        s.mark_pending("x_1", app, {"name": "x"})
+        s.mark_approved("x_1", app, "ou_boss")
+    s.mark_all_disabled("x_1", "account_expired")
+    s._set("x_1", "app-c", disabled_reason="offboard_event")   # 别的原因停用的不动
+    assert s.reopen_after_renewal("x_1") == 2
+    assert s.get("x_1", "app-a")["status"] == "expired"
+    assert s.get("x_1", "app-c")["status"] == "disabled"
+    assert s.mark_pending("x_1", "app-a", {"name": "x"}) is True
+    assert s.mark_pending("x_1", "app-c", {"name": "x"}) is False

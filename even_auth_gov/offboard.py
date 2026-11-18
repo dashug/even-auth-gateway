@@ -10,6 +10,7 @@ APP-AWARE(设计评审 #2 #16)但离职本身仍是**按用户**的一次性动�
 移组同样按用户一次做完:remove_approved_groups 清掉 Casdoor 上该用户所有 approved-* 组
 (以 Casdoor 为准,覆盖本地审批库里没有记录的迁移/手工授权用户);随后 remove_roles
 撤掉其全部角色。两者都尽力而为 —— 禁用才是断权,移组/撤角色失败不影响离职结果。
+负责人(飞书账号)停用成功后,连带停用其名下受管账号(里程碑 4a,account_lifecycle.cascade_sponsor)。
 """
 from __future__ import annotations
 import asyncio
@@ -70,6 +71,14 @@ async def apply(open_id: str, name: str, reason: str, client) -> bool:
                 logger.warning("Offboard 撤角色失败 %s: %s(已禁用,非致命)", open_id, e)
             approval_store.mark_all_disabled(open_id, reason)
             logger.info("Offboard 已禁用 Casdoor: %s (%s) via %s(第 %d 次)", name, open_id, reason, attempt)
+            if open_id.startswith("ou_"):
+                # 里程碑 4a:负责人停用 → 名下受管账号一起停。受管账号不能当负责人,所以不会循环触发;
+                # 失败只记日志,每小时账号扫描会按"负责人已停用"兜底。
+                try:
+                    from even_auth_gov import account_lifecycle
+                    await account_lifecycle.cascade_sponsor(open_id, name, client)
+                except Exception as e:
+                    logger.warning("连带停用 %s 名下账号失败: %s(每小时扫描兜底)", open_id, e)
             return True
         if attempt < _MAX_DISABLE_ATTEMPTS:
             await asyncio.sleep(2 ** attempt)  # 2s → 4s 退避

@@ -301,3 +301,20 @@ def test_process_card_error_without_resend_flag_does_not_resend(monkeypatch, tmp
     _capture_texts(monkeypatch)
     asyncio.run(feishu_ws._process_card(_card_data({"action": "sso_approve", "sso_open_id": "ou_x", "app": "app-b"})))
     assert resent == []
+
+
+def test_process_card_routes_account_buttons_to_lifecycle(monkeypatch):
+    from even_auth_gov import account_lifecycle, decision
+    seen, texts = [], []
+    async def fake_action(action, operator_id, user_id, client):
+        seen.append((action, operator_id, user_id)); return "已确认负责 张三 的账号,账号已启用"
+    async def fake_decision(*a, **k):
+        raise AssertionError("账号按钮不该走应用审批")
+    async def fake_send_text(to, text, receive_id_type="open_id"):
+        texts.append((to, text)); return True
+    monkeypatch.setattr(account_lifecycle, "handle_action", fake_action)
+    monkeypatch.setattr(decision, "handle", fake_decision)
+    monkeypatch.setattr("even_auth_gov.feishu.send_text", fake_send_text)
+    asyncio.run(feishu_ws._process_card(_card_data({"action": "acct_confirm", "account_id": "x_1"}, "ou_boss")))
+    assert seen == [("acct_confirm", "ou_boss", "x_1")]
+    assert texts == [("ou_boss", "👤 已确认负责 张三 的账号,账号已启用")]

@@ -127,6 +127,13 @@ Content-Type: application/json
 
 > 第一个接入的应用（`DEFAULT_APP`，默认 cs-hub）由 Casdoor 注册 webhook 自动建申请，可以不调。
 
+## 非飞书账号（外部合作方 / 服务账号）
+
+你的应用**不用改**。外部合作方、没飞书的员工用邮箱 + 密码在 Casdoor 登录，拿到的 token 和员工一样：`sub` 是他们的账号 id（`x_` 开头，不是飞书 open_id），准入看 `groups`、角色看 `roles`，判定逻辑完全相同。这些账号由网关管着负责人和到期日，过期或负责人离职会被停用，和员工离职一样对你透明。
+
+- **服务账号**（脚本、系统集成调你的接口）：用 password grant 换 token——`POST <casdoor>/api/login/oauth/access_token`，`grant_type=password&client_id=...&client_secret=...&username=<服务账号邮箱>&password=...&scope=openid`。需要管理员在 Casdoor 里给你的应用允许 `password` 授权类型。token 里的身份就是这个服务账号，照常判准入和角色。
+- 目前 token 里**看不出**是不是外部人员；如果你的应用需要对外部人员隐藏某些数据，先联系网关管理员（`evauth_kind` 进 token 不在当前范围）。
+
 ## 接入检查清单
 
 - [ ] Casdoor 注册应用（client_id/secret + 回调 URL 逐字一致）
@@ -138,3 +145,4 @@ Content-Type: application/json
 - [ ] 未准入时把 id_token `POST` 给网关 `/request-access`（demo 设 `GATEWAY_URL` 即开启）
 - [ ] 会话短 TTL / 每请求复验（保证离职即时断权）
 - [ ]（生产）JWKS 验 id_token 签名（RS256）；回调 HTTPS
+- [ ] 用 `sub` 当用户外键，不要假设它以 `ou_` 开头（非飞书账号是 `x_` 开头）

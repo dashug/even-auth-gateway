@@ -20,7 +20,7 @@ import os
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from even_auth_gov import (webhook as wh, settings, feishu_ws, scheduler, approval_store, logging_setup,
-                           casdoor_admin as ca, id_token)
+                           casdoor_admin as ca, id_token, accounts)
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +66,12 @@ def build_app() -> FastAPI:
         # 该应用其实分了角色就拒绝并重发带角色按钮的卡片(角色强制)。
         async with ca.make_client() as client:
             roles = await ca.list_app_roles(client, app_name, settings.known_apps())
+            identity = await accounts.identity_of(client, info.get("open_id", ""))   # 里程碑 4a:类型/负责人/有效期
         if roles is None:
             logger.warning("读取 %s 的角色清单失败,审批卡片不带角色按钮", app_name)
         ok = await send_card(owner, build_sso_approval_card(
             info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name, roles=roles or [],
-            note=info.get("note", ""),
+            note=info.get("note", ""), identity=identity,
         ))
         if not ok:
             raise RuntimeError(f"飞书 send_card 失败(审批人 {owner}, app={app_name})")
@@ -118,6 +119,11 @@ def build_app() -> FastAPI:
         if account.get("isForbidden"):
             logger.warning("request-access 拒绝(403): %s 账号已停用 app=%s", open_id, app_name)
             return JSONResponse({"error": "账号已停用"}, status_code=403)
+        if not open_id.startswith("ou_"):
+            reason = accounts.eligibility(account, accounts.today())   # 里程碑 4a 闸门
+            if reason:
+                logger.warning("request-access 拒绝(403): %s 不是合格的受管账号(%s) app=%s", open_id, reason, app_name)
+                return JSONResponse({"error": "账号未登记、未确认或已过期,请联系管理员"}, status_code=403)
         if ca.approved_group(app_name) in (account.get("groups") or []):
             return {"status": "approved", "app": app_name}   # 已有准入(如迁移进来的老用户),不必再批
         is_new = approval_store.mark_pending(open_id, app_name, {"name": who["name"], "email": who["email"]})

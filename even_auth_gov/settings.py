@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 
 def approver_feishu_id() -> str:
@@ -64,3 +65,41 @@ def casdoor_endpoint() -> str:
 
 def is_testing() -> bool:
     return bool(os.getenv("TESTING", ""))
+
+
+def timezone() -> str:
+    """业务日期(账号到期日等)按哪个时区算;与调度器同一个变量。"""
+    return os.getenv("SCHEDULER_TIMEZONE", "Asia/Shanghai")
+
+
+def _positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def account_max_days() -> int:
+    """受管账号每次有效期上限(天),建号/纳管/续期都受它约束。ACCOUNT_MAX_DAYS,默认 180。"""
+    return _positive_int("ACCOUNT_MAX_DAYS", 180)
+
+
+def account_renew_days() -> int:
+    """一次续期延长的天数。ACCOUNT_RENEW_DAYS,默认 90。"""
+    return _positive_int("ACCOUNT_RENEW_DAYS", 90)
+
+
+def account_remind_days() -> list[int]:
+    """到期前第几天提醒负责人续期(去重、降序)。ACCOUNT_REMIND_DAYS="14,3",配错或为空回到默认。"""
+    out = {int(x) for x in os.getenv("ACCOUNT_REMIND_DAYS", "14,3").replace(" ", "").split(",") if x.isdigit()}
+    return sorted(out, reverse=True) or [14, 3]
+
+
+def account_events_file() -> Path:
+    """受管账号变更历史(JSON Lines)。ACCOUNT_EVENTS_FILE,默认和审批库同目录的 account_events.jsonl。"""
+    raw = os.getenv("ACCOUNT_EVENTS_FILE", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    store = os.getenv("APPROVAL_STORE_FILE", "").strip()
+    return (Path(store).expanduser().parent if store else Path("data")) / "account_events.jsonl"

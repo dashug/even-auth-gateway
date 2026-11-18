@@ -25,8 +25,8 @@ from pathlib import Path
 
 _LOCK = threading.Lock()
 
-# 允许 mark_pending 建/重置为 pending 的前置状态:无记录、或曾被拒(可重新申请)。
-_REAPPLY_ALLOWED = {None, "denied"}
+# 允许 mark_pending 建/重置为 pending 的前置状态:无记录、曾被拒,或受管账号续期后重新开放(expired,里程碑 4a)。
+_REAPPLY_ALLOWED = {None, "denied", "expired"}
 
 
 def _now() -> str:
@@ -90,7 +90,7 @@ def _set(open_id: str, app: str, **fields):
 
 def mark_pending(open_id: str, app: str, profile: dict) -> bool:
     """返回是否需要发审批卡片(新建或允许的重新申请)。
-    守卫(#15):approved/disabled/pending 不被重置,只有无记录或 denied 可转 pending。
+    守卫(#15):approved/disabled/pending 不被重置,只有无记录、denied 或 expired(受管账号续期后)可转 pending。
     按 (open_id, app) 独立生效 —— 同一用户对另一个 app 的状态不受影响。"""
     with _mutate() as recs:
         key = _key(open_id, app)
@@ -126,8 +126,12 @@ def mark_escalated(open_id: str, app: str, to: str):
     重新申请(denied → pending)会建新记录,升级记录随之清零。"""
     _set(open_id, app, escalated_to=to, escalated_at=_now())
 
-def mark_denied(open_id: str, app: str, by: str):
-    _set(open_id, app, status="denied", denied_by=by, denied_at=_now())
+def mark_denied(open_id: str, app: str, by: str, reason: str = ""):
+    """reason:系统自动拒绝时的原因(如闸门拦下的 ineligible:<原因>),人工拒绝不写。"""
+    fields = {"status": "denied", "denied_by": by, "denied_at": _now()}
+    if reason:
+        fields["denied_reason"] = reason
+    _set(open_id, app, **fields)
 
 def records_for_open_id(open_id: str) -> list[dict]:
     """该用户名下所有 app 的记录(离职时用来逐个移组)。"""
@@ -153,6 +157,22 @@ def mark_disable_failed_all(open_id: str, reason: str):
                 rec["status"] = "disable_failed"
                 rec["disable_failed_reason"] = reason
                 rec["disable_failed_at"] = _now()
+
+# 受管账号(里程碑 4a)因这些原因被停用后,续期重新启用时允许重新申请。离职事件等其它原因不在此列。
+_REOPEN_REASONS = {"account_expired", "account_invalid", "sponsor_left", "sponsor_rejected"}
+
+def reopen_after_renewal(open_id: str) -> int:
+    """受管账号续期后重新启用:把它因到期 / 信息异常 / 负责人离职或拒绝而停用的记录改成 expired,
+    让对方可以重新申请(mark_pending 放行 expired)。返回改了几条。"""
+    n = 0
+    with _mutate() as recs:
+        for rec in recs.values():
+            if (rec.get("open_id") == open_id and rec.get("status") == "disabled"
+                    and rec.get("disabled_reason") in _REOPEN_REASONS):
+                rec["status"] = "expired"
+                rec["reopened_at"] = _now()
+                n += 1
+    return n
 
 def all_records() -> dict:
     """原始 {key: record} 映射(record 自带 open_id/app/status),供 reconcile 遍历去重。"""
