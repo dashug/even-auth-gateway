@@ -119,3 +119,20 @@
 - **迁移 `--role`**：不存在的角色 → 整批中止、一个人都不动；正确角色 → 有准入组 + 角色。
 - **权限核对**：造出的 4 类需处理异常（本地离职但 Casdoor 启用 / 停用仍挂组 / 有准入没角色 / 有角色没准入）和 2 条 info 全部核出，正常用户无误报；`get-users` 的 `groups`、`get-roles` 的 `users`（`<owner>/<name>`）形状与单测假设一致；CLI 输出与函数一致；每日推送文本如预期。
 
+
+## 9. 里程碑 4a 前置实测（2026-11-18，`casbin/casdoor:v4.29.0` 临时实例）
+
+设计见 `docs/superpowers/specs/2026-11-18-m4a-managed-accounts-design.md` 第 6 节。治理服务的调用方式（client credentials）建号、改属性。
+
+- **S1 邮箱登录**：`name`/`id` 都是随机串（`x_0123…`）的密码账号，用**邮箱**登录可行——网页登录（`/api/login`，`signinMethod=Password`）和 password grant 都通过，用 `name` 也通过。
+  - ⟹ 受管账号 `name = id = x_<16 hex>`，对外只告诉对方邮箱。
+- **S2 强制改密码**：用户对象有 `needUpdatePassword`（另有 `lastChangePasswordTime`）。置 true 后网页登录返回 `status=ok, data="RequiredUpdatePassword"`（登录页转改密码），**password grant 直接 `invalid_grant`**。
+  - ⟹ 人员账号建号时置 true；`service` 账号不能置（否则 password grant 永远失败）。
+- **S3 只改 properties**：`add-user` 可直接带 `properties`；`update-user?columns=properties` 整对象回写只落 `properties` 一列（同一请求里改的 `displayName` 被忽略），原有 `oauth_Lark_*` 保留，新键合并进去。
+  - ⟹ `set_properties` 读出 → 合并 → `columns=properties` 回写。
+- **S4 停用挡密码登录**：`isForbidden=true` 后网页登录报 `The user is forbidden to sign in, please contact the administrator`，password grant `invalid_grant`。
+- **S5 自助注册（§1.1 风险属实）**：应用 `enableSignUp=true`、注册项不要求手机/邮箱验证码时，陌生人 `POST /api/signup` 直接建出**启用中**的账号（`id` 是 UUID，姓名/邮箱自填，`signupApplication=demo-app`）。默认注册项要求手机验证码，没配短信服务时碰巧注册不了——**不能当防线**。
+  - 关法：应用打开 **`disableSelfSignup=true`**（`enableSignUp` 保持 true）→ `/api/signup` 报 `The application does not allow to sign up new account`。源码（v4.29.0 `object/application.go` `IsSelfSignupEnabled`）注释：关掉后只剩登录方式（如飞书首登）的注册和管理员发的邀请码；OAuth 首登分支（`controllers/auth.go:1250-1255`）只查 `EnableSignUp` + `IsSignupAllowedFor` + `providerItem.CanSignUp`，不看 `DisableSelfSignup`。
+  - **邀请码不能用来关注册**：OAuth 首登分支同样调 `CheckInvitationCode`，注册项把邀请码设成必填会连飞书首登一起挡掉。
+  - ⟹ 部署要求 `disableSelfSignup=true`；飞书首登不受影响这一点**需真实飞书联调时确认**。治理层闸门照做（纵深防御，配置被改回也拦得住）。
+- **S6 建号是否触发 webhook**：本地实例仍**不投递任何 webhook**（容器→宿主机连通已验证；org=even-test 与 built-in 各配一个、事件 signup/add-user，client credentials 建号、admin 会话建号、自助注册均零回调），与 §6 现象一致。无结论，闸门两种情况都覆盖。
