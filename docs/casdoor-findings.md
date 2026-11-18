@@ -136,3 +136,13 @@
   - **邀请码不能用来关注册**：OAuth 首登分支同样调 `CheckInvitationCode`，注册项把邀请码设成必填会连飞书首登一起挡掉。
   - ⟹ 部署要求 `disableSelfSignup=true`；飞书首登不受影响这一点**需真实飞书联调时确认**。治理层闸门照做（纵深防御，配置被改回也拦得住）。
 - **S6 建号是否触发 webhook**：本地实例仍**不投递任何 webhook**（容器→宿主机连通已验证；org=even-test 与 built-in 各配一个、事件 signup/add-user，client credentials 建号、admin 会话建号、自助注册均零回调），与 §6 现象一致。无结论，闸门两种情况都覆盖。
+- **端到端（2026-11-18，同一实例，真实代码，只把飞书发送换成捕获，22 项全过）**：
+  1. 命令行建号 → Casdoor 里账号停用、`needUpdatePassword=true`、`evauth_*` 登记信息正确；确认卡片发给负责人。用初始密码 password grant 被拒（先命中"必须改密码"）。
+  2. 非负责人点「确认负责」被拒；负责人确认 → 账号启用；网页登录返回 `RequiredUpdatePassword`。
+  3. 服务账号确认后 password grant 拿到 id_token → `/request-access` 建出待批；审批卡片带"服务账号 · 负责人 … · 有效期至 …"；批准为查看者后进准入组。
+  4. S5 自助注册出的陌生账号 → `/request-access` 403；核对报表报 `unregistered_account`。
+  5. 把到期日改成昨天 → 扫描停用账号、清准入组、撤角色，审批记录 `disabled/account_expired`，到期通知发给负责人。扫描同时把实测留下的、只登记了类型的 `x_forb` 按"登记信息异常"停用（宁可错停，符合设计）。
+  6. 续期 → 账号重新启用、1 条记录放开为 `expired`，重新 `/request-access` 能建出新的待批。
+  7. 负责人离职（`offboard.apply`）→ 名下两个账号连带停用，汇总发给全局审批人。
+  8. 变更历史含 created/confirmed/expired/renewed/sponsor_left，不含密码；`access_report --anomalies` 命令行与函数结果一致；`accounts list` 正常。
+  - 未验证（需真实飞书）：确认卡片、续期卡片在飞书 PC/手机上的显示与按钮回调；`disableSelfSignup` 打开后飞书首次扫码仍能自动注册。

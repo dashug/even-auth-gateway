@@ -25,6 +25,8 @@
 | `migrate_emails.py` | 邮箱白名单 → Casdoor 组 迁移（cs-hub 试点），CLI 支持 `--dry-run` |
 | `audit_export.py` | 审批/停用审计导出 CSV（CLI，可按 app/状态过滤） |
 | `access_report.py` | 权限视图“谁能访问什么” + 离职撤权核对（以 Casdoor 实际状态为准，CLI 导出 CSV；每日对账后推送异常） |
+| `accounts.py` | 受管的非飞书账号：规则（类型/负责人/到期日）、审批闸门、管理员命令行 `python -m even_auth_gov.accounts` |
+| `account_lifecycle.py` | 受管账号生命周期：建号/纳管/负责人确认、到期扫描与续期提醒、续期、负责人离职连带停用、换负责人、设密码 |
 | `id_token.py` | `/request-access` 鉴权：验接入应用转交的 Casdoor id_token（JWKS 验签，`aud`→应用） |
 | `app.py` | FastAPI 组装（webhook 路由 + `/request-access` + `/healthz`） |
 | `feishu.py` | 网关自带飞书集成（client/发消息/卡片构建,卡片带 app 标识与按角色批准按钮） |
@@ -40,6 +42,8 @@
 - 审批卡片**送达才算已通知**：飞书发送失败或审批人未配置 → `notified_at` 留空，每小时的待批扫描补发；已送达但超 `SSO_PENDING_RESEND_SECONDS`（默认 1 天）仍待批 → 再催办一次。
 - 超时升级（里程碑 3）：审批人**第一次收到卡片**后超过 `APPROVAL_ESCALATE_HOURS`（默认 24）仍未处理 → 卡片另发给 `APPROVAL_ESCALATE_TO`（默认全局审批人），升级对象和原审批人谁先点算谁；每条申请只升级一次，审计导出带 `escalated_to/at`。审批人本身就是全局审批人的应用不升级。
 - 权限视图与撤权核对（F-5.8.3）：`access_report` 以 Casdoor 实际的组/角色/账号状态为准，合上审批库留痕，导出"人 × 应用"一张表；核对清单按严重程度列出离职未停用、停用后仍挂权限、有角色没准入、有准入没角色、迁移/手工授权等。每日对账后自动核对，高/中级异常推给全局审批人。
+- 非飞书账号（里程碑 4a）：外部合作方、没飞书的员工、服务账号用邮箱/密码登录，**每个都必须登记负责人（飞书员工）和到期日**（写在 Casdoor 用户 `properties` 的 `evauth_*` 键上）。只能由管理员命令行建号，负责人在飞书点「确认负责」后才启用。没登记、负责人没确认、已过期的非飞书账号**过不了审批闸门**（signup webhook / `/request-access` / 批准三处都查），堵住了"陌生人自助注册后骗批准"。
+- 受管账号回收：到期前 14/3 天给负责人发续期卡片，过期按离职流程停用（停账号 + 清准入组和角色）；负责人离职时名下账号连带停用，每日对账也会查负责人的在职状态；登记信息异常按到期处理（宁可错停）。续期后账号重新启用，但要重新申请各应用。飞书员工的备用密码登录挂在本人账号上，离职停用自然覆盖。
 - 审批结果回告：点完按钮后，审批人收到处理结果（含 Casdoor 加组失败提示，可再点重试），申请人收到批准/拒绝通知。
 - 离职撤销：短 token + 中心拦截（禁用即挡登录 + 应用刷新回 Casdoor 复验）。
 - 详见 `docs/design.md`、`docs/implementation-plan.md`、`docs/casdoor-findings.md`（Phase 0 对活实例的实测结论）。
@@ -66,6 +70,9 @@ SSO_PENDING_SWEEP_CRON                # 待批扫描:补发/催办/超时升级(
 APPROVAL_ESCALATE_HOURS               # 审批人收到卡片后多少小时未处理就升级(默认 24;0 关闭)
 APPROVAL_ESCALATE_TO                  # 超时升级给谁(飞书 open_id;默认 APPROVER_FEISHU_ID)
 ACCESS_REPORT_ALERT                   # 每日对账后推送权限核对异常(默认 true)
+ACCOUNT_MAX_DAYS / ACCOUNT_RENEW_DAYS # 受管账号每次有效期上限 / 一次续期天数(默认 180 / 90)
+ACCOUNT_REMIND_DAYS                   # 到期前第几天提醒负责人续期(默认 14,3)
+ACCOUNT_EVENTS_FILE                   # 受管账号变更历史(默认和审批库同目录的 account_events.jsonl)
 SSO_LOG_LEVEL                         # 日志级别(默认 INFO)
 CHANNEL_CLIENTS_ENABLED / SCHEDULER_ENABLED  # 关掉飞书 WS / 对账调度(默认开)
 ```
@@ -86,10 +93,11 @@ Casdoor 本地起：`docker compose -f deploy/casdoor/docker-compose.yml up -d`�
 
 - 治理服务镜像：仓库根 `Dockerfile`；compose 里是 `gov` profile：`docker compose -f deploy/casdoor/docker-compose.yml --profile gov up -d --build`（单实例，见部署 README「单实例约束」）。
 - 探活：`GET /healthz` → `{"status":"ok","feishu_ws":bool,"scheduler":bool}`。
-- 审计导出：`python -m even_auth_gov.audit_export -o audit.csv [--app X] [--status S]`。
+- 审计导出：`python -m even_auth_gov.audit_export -o audit.csv [--app X] [--status S]`；受管账号变更历史加 `--accounts`。
+- 受管账号：`python -m even_auth_gov.accounts create --kind partner|staff|service --name N --email E --sponsor <负责人飞书邮箱> --expires YYYY-MM-DD`（初始密码只打印一次）；另有 `register`（纳管已有账号）、`resend-confirm`、`renew`、`transfer`、`set-password`（含飞书员工备用登录）、`list`。
 - 权限视图：`python -m even_auth_gov.access_report -o access.csv [--app X]`；撤权核对：`--anomalies [--check-feishu]`（后者逐个查飞书在职状态，慢）。
 - 老操作员迁移：`python -m even_auth_gov.migrate_emails admin_auth.json --dry-run`（确认后去掉 `--dry-run`；应用分了角色时加 `--role <角色>`）。
-- 备份：`deploy/casdoor/backup.sh`（Casdoor 库 + 审批库）。
+- 备份：`deploy/casdoor/backup.sh`（Casdoor 库 + 审批库 + 受管账号变更历史）。
 
 ## 待办（生产上线前）
 
@@ -101,11 +109,13 @@ Casdoor 本地起：`docker compose -f deploy/casdoor/docker-compose.yml up -d`�
 - [x] **`/request-access` 改验 id_token** —— 去掉与 webhook 共用的共享密钥，防冒名骗批准；已对活 Casdoor 端到端验证（`docs/casdoor-findings.md` §7）。
 - [x] **审批时选角色（F-5.5.3）** —— 角色清单取自 Casdoor `<app>-<role>`，按角色出批准按钮；审计导出带 `role` 列。批准时该应用只留所选角色，拒绝撤该应用角色，离职撤全部角色。
 - [x] **里程碑 3 · 平台化治理** —— 权限视图 + 离职撤权核对（`access_report`，每日推送异常）；角色强制（分了角色的应用不许无角色批准、迁移 `--role`）；审批超时升级（`APPROVAL_ESCALATE_*`，每小时待批扫描）。
+- [x] **里程碑 4a · 非飞书账号与受管外部账号** —— 邮箱/密码账号必须有负责人 + 到期日；邀请制建号 + 负责人确认；审批闸门（顺带修了自助注册骗批准）；到期提醒/续期/过期停用；负责人离职连带停用；核对报表报出未登记和过期仍启用的账号。已对活 Casdoor 端到端验证（`docs/casdoor-findings.md` §9）。
 - [x] **webhook 验签对齐 Casdoor 真实行为** —— Casdoor **不做 body HMAC 签名**,认证靠 webhook 上配置的**自定义头传共享 token**（见 `docs/casdoor-findings.md`）。`_verify` 改为常量时间比对 `CASDOOR_WEBHOOK_HEADER`（默认 `X-Webhook-Token`）的值 == `CASDOOR_WEBHOOK_SECRET`（fail-closed）；body 按 Casdoor Record 解析（`extendedUser`/`object` 取用户对象）。活验:正确 token+真实 Record→200、错/无 token→401、pending 正确建出。
 
 以下需要真实环境，代码侧做不了，上线前逐项过：
 
-- [ ] **接真实飞书联调** —— 目前只有单测 + 飞书侧模拟的端到端。要确认：离职事件能收到并禁用；审批卡片在 PC / 手机上显示正常（含角色按钮）、点击能回调到网关并按所选角色开通；审批结果通知送达审批人和申请人。
+- [ ] **接真实飞书联调** —— 目前只有单测 + 飞书侧模拟的端到端。要确认：离职事件能收到并禁用；审批卡片在 PC / 手机上显示正常（含角色按钮、非飞书账号的身份行）、点击能回调到网关并按所选角色开通；审批结果通知送达审批人和申请人；受管账号的负责人确认卡片、续期提醒卡片显示正常、按钮回调生效。
+- [ ] **Casdoor 关闭自助注册** —— 生产应用打开 `disableSelfSignup`（`enableSignUp` 保持开着），见部署 README「受管的非飞书账号」；真实飞书联调时确认飞书首次扫码仍能自动注册。
 - [ ] **飞书开放平台配置** —— 机器人、长连接事件/回调、通讯录权限范围覆盖全员，见部署 README「治理服务」一节。
 - [ ] **生产部署** —— 按 `deploy/casdoor/README.md`「生产部署（上线前清单）」：强密码、钉镜像 digest、nginx TLS、`gov.env`（含 `APP_CLIENT_IDS` / `CASDOOR_ISSUER`）、备份 cron。
 - [ ] **恢复演练** —— `backup.sh` 只管备份；异地留存 + 实际恢复一次（PRD 风险项）还没做。
@@ -114,7 +124,7 @@ Casdoor 本地起：`docker compose -f deploy/casdoor/docker-compose.yml up -d`�
 
 PRD 后续里程碑（未开始，单独立项）：
 
-- 里程碑 4（P2）：多身份源（邮箱/密码、其他 OIDC/SAML，F-5.1.2）；受控外部合作方；账号自动供给/回收。
+- 里程碑 4b（P2）：账号自动供给/回收。外部 OIDC/SAML 身份提供方等有具体对接方时再加（治理层不用改，配 Casdoor 并把外部登录绑到已建账号）。
 
 已确认的约束：
 
