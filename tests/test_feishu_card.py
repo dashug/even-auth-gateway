@@ -71,3 +71,12 @@ def test_account_confirm_card(mode, phrase):
     assert phrase in md and "2027-02-01" in md and "张三" in md
     assert [b["value"] for b in card["elements"][-1]["actions"]] == [
         {"action": "acct_confirm", "account_id": "x_1"}, {"action": "acct_reject", "account_id": "x_1"}]
+
+
+def test_account_renew_card():
+    card = feishu.build_account_renew_card("x_1", "张三", "外部合作方", "2027-02-01", 3, 90)
+    md = card["elements"][0]["content"]
+    assert "2027-02-01" in md and "3 天后" in md and "90 天" in md
+    assert [b["value"] for b in card["elements"][-1]["actions"]] == [
+        {"action": "acct_renew", "account_id": "x_1"}, {"action": "acct_no_renew", "account_id": "x_1"}]
+    assert "今天" in feishu.build_account_renew_card("x_1", "张三", "外部合作方", "2027-02-01", 0, 90)["elements"][0]["content"]

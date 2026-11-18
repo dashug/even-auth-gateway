@@ -223,3 +223,15 @@ def test_sweep_escalation_clock_starts_when_approver_first_got_the_card(monkeypa
     approval_store._set("ou_late", "app-a", notified_at=two_h_ago, first_notified_at=two_h_ago)
     asyncio.run(reconcile.sweep_pending())
     assert not [i for i in sent if i.get("to")]
+
+
+def test_reconcile_runs_account_sweep_after_pending_sweep(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    from even_auth_gov import account_lifecycle
+    order = []
+    async def fake_pending(): order.append("pending")
+    async def fake_accounts(client): order.append("accounts")
+    monkeypatch.setattr(reconcile, "sweep_pending", fake_pending)
+    monkeypatch.setattr(account_lifecycle, "sweep", fake_accounts)
+    asyncio.run(reconcile.run(client=None))
+    assert order[:2] == ["pending", "accounts"]

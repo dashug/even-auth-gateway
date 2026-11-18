@@ -209,3 +209,140 @@ def test_resend_confirm(env):
     click(env, "acct_confirm", "ou_boss", r["user_id"])
     with pytest.raises(lc.AccountError, match="不需要重发"):
         run(env["fc"], lambda c: lc.resend_confirm(c, r["user_id"]))
+
+
+# ── 到期扫描、续期提醒、续期 ──
+
+def active(env, uid="x_a", sponsor="ou_boss", expires=None, groups=("even-test/approved-app-a",), **props):
+    p = {"evauth_kind": "partner", "evauth_sponsor": sponsor, "evauth_expires": expires or day(30),
+         "evauth_confirmed_at": "2026-11-01T00:00:00+00:00", "evauth_origin": "created"}
+    p.update(props)
+    return env["fc"].add(id=uid, displayName=f"受管{uid}", email=f"{uid}@p.com", groups=list(groups),
+                         properties={k: v for k, v in p.items() if v is not None})
+
+
+def sweep(env):
+    run(env["fc"], lc.sweep)
+
+
+@pytest.mark.parametrize("over,reason,event", [
+    ({"expires": "2020-01-01"}, "account_expired", "expired"),
+    ({"evauth_kind": "vendor"}, "account_invalid", "invalid"),
+    ({"evauth_rejected_at": "2026-11-02T00:00:00+00:00"}, "sponsor_rejected", "rejected_disabled"),
+])
+def test_sweep_disables_lapsed_accounts_via_offboard(env, over, reason, event):
+    approval_store.mark_pending("x_a", "app-a", {"name": "a"})
+    approval_store.mark_approved("x_a", "app-a", "ou_appr")
+    active(env, **over)
+    sweep(env)
+    u = env["fc"].users["x_a"]
+    assert u["isForbidden"] is True and u["groups"] == []
+    rec = approval_store.get("x_a", "app-a")
+    assert rec["status"] == "disabled" and rec["disabled_reason"] == reason
+    assert events(env)[-1]["event"] == event
+
+
+def test_sweep_disables_when_sponsor_is_disabled_or_gone(env):
+    env["fc"].users["ou_other"]["isForbidden"] = True
+    active(env, uid="x_a", sponsor="ou_other")
+    active(env, uid="x_b", sponsor="ou_ghost")
+    sweep(env)
+    assert env["fc"].users["x_a"]["isForbidden"] and env["fc"].users["x_b"]["isForbidden"]
+    assert any(to == "ou_root" and "负责人已停用" in t for to, t in env["sent"]["texts"])
+
+
+def test_expiry_notice_goes_to_sponsor(env):
+    active(env, expires="2020-01-01")
+    sweep(env)
+    assert any(to == "ou_boss" and "已停用" in t for to, t in env["sent"]["texts"])
+
+
+def test_sweep_leaves_feishu_unregistered_disabled_and_healthy_accounts_alone(env):
+    env["fc"].add(id="uuid-s", email="s@x.com", groups=["even-test/approved-app-a"])   # 未登记:只拦不停
+    active(env, uid="x_off", expires="2020-01-01", groups=())
+    env["fc"].users["x_off"]["isForbidden"] = True
+    active(env, uid="x_ok")
+    sweep(env)
+    assert env["fc"].users["uuid-s"]["isForbidden"] is False
+    assert env["fc"].users["x_ok"]["isForbidden"] is False
+    assert env["fc"].users["ou_boss"]["isForbidden"] is False
+
+
+def test_sweep_skips_everything_when_users_unreadable(env):
+    active(env, expires="2020-01-01")
+    env["fc"].fail.add("/api/get-users")
+    sweep(env)
+    assert env["fc"].users["x_a"]["isForbidden"] is False
+
+
+def test_reminders_once_per_stage(env, monkeypatch):
+    exp = day(14)                      # 先存下来:下面会把"今天"往后挪,day() 会跟着变
+    active(env, expires=exp)
+    sweep(env); sweep(env)
+    assert len(env["sent"]["cards"]) == 1
+    to, card = env["sent"]["cards"][0]
+    assert to == "ou_boss" and [b["action"] for b in buttons(card)] == ["acct_renew", "acct_no_renew"]
+    assert env["fc"].props("x_a")["evauth_reminded"] == f"{exp}:14"
+    real_today = acc.today()
+    monkeypatch.setattr(acc, "today", lambda: real_today + timedelta(days=11))   # 剩 3 天
+    sweep(env)
+    assert len(env["sent"]["cards"]) == 2 and env["fc"].props("x_a")["evauth_reminded"] == f"{exp}:3"
+
+
+def test_reminder_send_failure_is_retried(env):
+    active(env, expires=day(3))
+    env["sent"]["card_ok"] = False
+    sweep(env)
+    assert "evauth_reminded" not in env["fc"].props("x_a")
+
+
+def test_sponsor_renews_from_card(env):
+    active(env, expires=day(10), evauth_reminded=f"{day(10)}:14")
+    msg = click(env, "acct_renew", "ou_boss", "x_a")
+    assert day(100) in msg
+    p = env["fc"].props("x_a")
+    assert p["evauth_expires"] == day(100) and "evauth_reminded" not in p
+    assert events(env)[-1]["event"] == "renewed"
+    assert "只有该账号的负责人" in click(env, "acct_renew", "ou_other", "x_a")
+
+
+def test_no_renew_stops_reminders(env, monkeypatch):
+    active(env, expires=day(14))
+    assert "不再提醒" in click(env, "acct_no_renew", "ou_boss", "x_a")
+    real_today = acc.today()
+    monkeypatch.setattr(acc, "today", lambda: real_today + timedelta(days=12))
+    sweep(env)
+    assert env["sent"]["cards"] == []
+
+
+def test_renew_after_expiry_reenables_and_allows_reapplying(env):
+    approval_store.mark_pending("x_a", "app-a", {"name": "a"})
+    approval_store.mark_approved("x_a", "app-a", "ou_appr")
+    active(env, expires="2020-01-01")
+    sweep(env)
+    assert approval_store.mark_pending("x_a", "app-a", {"name": "a"}) is False   # 停用记录挡住重新申请
+    r = run(env["fc"], lambda c: lc.renew(c, "x_a", actor="admin"))
+    assert r["enabled"] is True and r["reopened"] == 1 and r["expires"] == day(90)
+    assert env["fc"].users["x_a"]["isForbidden"] is False
+    assert approval_store.get("x_a", "app-a")["status"] == "expired"
+    assert approval_store.mark_pending("x_a", "app-a", {"name": "a"}) is True
+
+
+def test_renew_refusals(env):
+    active(env, uid="x_rej", evauth_rejected_at="2026-11-02T00:00:00+00:00")
+    with pytest.raises(lc.AccountError, match="拒绝过"):
+        run(env["fc"], lambda c: lc.renew(c, "x_rej", actor="admin"))
+    env["fc"].users["ou_other"]["isForbidden"] = True
+    active(env, uid="x_orphan", sponsor="ou_other")
+    env["fc"].users["x_orphan"]["isForbidden"] = True
+    with pytest.raises(lc.AccountError, match="负责人已停用"):
+        run(env["fc"], lambda c: lc.renew(c, "x_orphan", actor="admin"))
+    active(env, uid="x_c")
+    with pytest.raises(lc.AccountError, match="最长"):
+        run(env["fc"], lambda c: lc.renew(c, "x_c", actor="admin", expires=day(500)))
+
+
+def test_renew_does_not_enable_unconfirmed_created_account(env):
+    r = create(env)
+    run(env["fc"], lambda c: lc.renew(c, r["user_id"], actor="admin"))
+    assert env["fc"].users[r["user_id"]]["isForbidden"] is True

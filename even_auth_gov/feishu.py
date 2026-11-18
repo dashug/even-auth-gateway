@@ -176,3 +176,26 @@ def build_account_confirm_card(user_id: str, name: str, email: str, kind_label: 
             ]},
         ],
     }
+
+
+def build_account_renew_card(user_id: str, name: str, kind_label: str, expires: str, days_left: int,
+                             renew_days: int) -> dict:
+    """到期前给负责人的续期提醒卡片(里程碑 4a)。"""
+    when = "今天" if days_left == 0 else f"{days_left} 天后"
+    text = (f"**{name}**({kind_label})的账号将于 **{expires}** 到期({when})。\n\n"
+            f"续期后有效期延长 {renew_days} 天;不续期就到期自动停用,之后对方要重新申请各应用。")
+    base = {"account_id": user_id}
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": "⏳ 账号即将到期"}, "template": "yellow"},
+        "elements": [
+            {"tag": "markdown", "content": text},
+            {"tag": "hr"},
+            {"tag": "action", "actions": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": f"续期 {renew_days} 天"},
+                 "type": "primary", "value": {"action": "acct_renew", **base}},
+                {"tag": "button", "text": {"tag": "plain_text", "content": "不再续期"},
+                 "type": "default", "value": {"action": "acct_no_renew", **base}},
+            ]},
+        ],
+    }

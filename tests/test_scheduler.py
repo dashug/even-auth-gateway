@@ -96,13 +96,24 @@ def test_pending_sweep_job_runs_hourly_by_default_and_is_configurable(monkeypatc
     asyncio.run(_go("*/10 9-18 * * *", "*/10", "9-18"))
 
 
-def test_pending_job_calls_sweep_pending(monkeypatch):
-    calls = []
-    async def fake_sweep():
-        calls.append(1)
-    monkeypatch.setattr(reconcile, "sweep_pending", fake_sweep)
+def test_pending_job_runs_pending_sweep_then_account_sweep(monkeypatch):
+    from even_auth_gov import account_lifecycle
+    order = []
+    async def fake_pending(): order.append("pending")
+    async def fake_accounts(client): order.append("accounts")
+    monkeypatch.setattr(reconcile, "sweep_pending", fake_pending)
+    monkeypatch.setattr(account_lifecycle, "sweep", fake_accounts)
     asyncio.run(sch._run_pending_job())
-    assert calls == [1]
+    assert order == ["pending", "accounts"]
+
+
+def test_pending_job_survives_account_sweep_failure(monkeypatch):
+    from even_auth_gov import account_lifecycle
+    async def fake_pending(): pass
+    async def boom(client): raise RuntimeError("casdoor down")
+    monkeypatch.setattr(reconcile, "sweep_pending", fake_pending)
+    monkeypatch.setattr(account_lifecycle, "sweep", boom)
+    asyncio.run(sch._run_pending_job())   # 不抛
 
 
 def test_reconcile_job_pushes_access_report_after_reconcile(monkeypatch):

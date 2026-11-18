@@ -130,6 +130,12 @@ async def sweep_pending() -> None:
 async def run(client) -> None:
     # 0) 待审批补发/催办/超时升级(调度器另有每小时一次的同一扫描)。
     await sweep_pending()
+    # 0b) 受管账号扫描(里程碑 4a:到期 / 负责人已停用;每小时任务也跑,内部有锁)。
+    from even_auth_gov import account_lifecycle
+    try:
+        await account_lifecycle.sweep(client)
+    except Exception as e:
+        logger.warning("Reconcile: 受管账号扫描失败: %s", e)
     # 1) 兜底重试:上次禁用失败的(安全攸关,优先)。apply 内部会重试+成功则转 disabled,再失败仍标 disable_failed+告警。
     # 离职是按用户的 —— 同一用户可能在多个 app 记录上都是 disable_failed,去重后只重试一次。
     for open_id in _distinct_open_ids_by_status("disable_failed"):

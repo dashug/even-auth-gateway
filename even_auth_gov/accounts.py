@@ -206,7 +206,14 @@ async def _cmd_resend(client, a) -> str:
     return "确认卡片已重发" if await _lc().resend_confirm(client, a.user) else "⚠️ 确认卡片发送失败"
 
 
-_COMMANDS = {"create": _cmd_create, "register": _cmd_register, "resend-confirm": _cmd_resend}
+async def _cmd_renew(client, a) -> str:
+    r = await _lc().renew(client, a.user, actor="admin", expires=a.expires or "")
+    tail = f",账号已重新启用;{r['reopened']} 条审批记录已放开,对方可以重新申请" if r["enabled"] else ""
+    return f"已续期到 {r['expires']}{tail}"
+
+
+_COMMANDS = {"create": _cmd_create, "register": _cmd_register, "resend-confirm": _cmd_resend,
+             "renew": _cmd_renew}
 
 
 def _parser():
@@ -227,6 +234,9 @@ def _parser():
     r.add_argument("--expires", required=True, help="到期日 YYYY-MM-DD")
     s = sub.add_parser("resend-confirm", help="重发负责人确认卡片")
     s.add_argument("--user", required=True, help="邮箱或账号 id")
+    n = sub.add_parser("renew", help="续期(停用中且负责人确认过的会重新启用)")
+    n.add_argument("--user", required=True, help="邮箱或账号 id")
+    n.add_argument("--expires", default="", help="指定到期日 YYYY-MM-DD;不给则按 ACCOUNT_RENEW_DAYS 延长")
     return ap, sub
 
 

@@ -1,12 +1,13 @@
 """受管账号的生命周期操作(会读写 Casdoor、发飞书)—— 里程碑 4a。
 
-本任务:建号 create、纳管 register、负责人确认/拒绝(handle_action)、重发确认卡片。
-后续任务在此追加:到期扫描与续期(sweep / renew)、负责人离职连带停用(cascade_sponsor)、换负责人、设密码、列表。
+建号 create、纳管 register、负责人确认/拒绝/续期按钮(handle_action)、重发确认卡片、
+到期扫描与续期提醒(sweep)、续期(renew)。
 规则在 accounts.py;卡片样式在 feishu.py;卡片按钮由 feishu_ws 转到 handle_action。
 停用一律走 offboard.apply(重试 + 告警 + 清准入组和角色)。变更历史追加写到 account_events.jsonl,写失败只记日志。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -195,6 +196,20 @@ async def handle_action(action: str, operator_id: str, user_id: str, client) -> 
         return await _confirm(client, user, operator_id)
     if action == "acct_reject":
         return await _reject(client, user, operator_id)
+    if action == "acct_renew":
+        try:
+            r = await renew(client, user, actor=operator_id)
+        except AccountError as e:
+            return f"续期失败:{e}"
+        msg = f"已为 {acc.display_name(user)} 续期到 {r['expires']}"
+        return msg + (",账号已重新启用(对方需要重新申请各应用)" if r["enabled"] else "")
+    if action == "acct_no_renew":
+        p = acc.props(user)
+        last = f"{p.get(acc.P_EXPIRES)}:{min(settings.account_remind_days())}"
+        if not await ca.set_properties(client, user["id"], {acc.P_REMINDED: last}):
+            return "操作失败:写入 Casdoor 失败,请稍后再点"
+        log_event("no_renew", user, operator_id)
+        return f"好的,不再提醒;{acc.display_name(user)} 的账号将于 {p.get(acc.P_EXPIRES)} 到期后停用"
     return f"未知操作: {action}"
 
 
@@ -234,3 +249,119 @@ async def _reject(client, user: dict, operator_id: str) -> str:
     from even_auth_gov import offboard   # 纳管的账号还启用着:没人负责就停掉
     await offboard.apply(user["id"], name, "sponsor_rejected", client)
     return f"已拒绝负责 {name} 的账号,该账号已停用"
+
+
+# ── 到期扫描、续期提醒、续期 ──
+
+_SWEEP_LOCK = asyncio.Lock()   # 每小时任务和每日对账都会调 sweep,同一时刻只跑一个
+_DISABLE_EVENTS = {"account_expired": "expired", "account_invalid": "invalid",
+                   "sponsor_left": "sponsor_left", "sponsor_rejected": "rejected_disabled"}
+
+
+def _lapse_reason(user: dict, on, by_id: dict) -> str:
+    """启用中的受管账号该不该停,'' = 不停。登记信息异常按到期处理(宁可错停)。"""
+    if not acc.metadata_ok(user):
+        return "account_invalid"
+    if acc.days_left(user, on) < 0:
+        return "account_expired"
+    if acc.props(user).get(acc.P_REJECTED):
+        return "sponsor_rejected"
+    sponsor = by_id.get(acc.props(user).get(acc.P_SPONSOR))
+    if sponsor is None or sponsor.get("isForbidden"):
+        return "sponsor_left"
+    return ""
+
+
+async def sweep(client) -> None:
+    """受管账号扫描:停掉过期 / 信息异常 / 负责人拒绝 / 负责人已停用的账号,给快到期的发续期提醒。
+    读不到 Casdoor 用户列表就整步跳过(下次再试)。飞书账号和未登记账号不在这里处理。"""
+    async with _SWEEP_LOCK:
+        users = await ca.list_users(client)
+        if users is None:
+            logger.warning("受管账号扫描跳过:读不到 Casdoor 用户列表(下次再试)")
+            return
+        by_id = {u.get("id"): u for u in users if u.get("id")}
+        on = acc.today()
+        for user in users:
+            if not acc.is_managed(user) or user.get("isForbidden"):
+                continue
+            reason = _lapse_reason(user, on, by_id)
+            if reason:
+                await _disable(client, user, reason)
+            else:
+                await _maybe_remind(client, user, on)
+
+
+async def _disable(client, user: dict, reason: str) -> bool:
+    from even_auth_gov import offboard
+    name = acc.display_name(user)
+    if not await offboard.apply(user["id"], name, reason, client):
+        return False   # offboard 已标 disable_failed 并告警;下次扫描还会再试
+    log_event(_DISABLE_EVENTS[reason], user, "system")
+    p = acc.props(user)
+    if reason == "account_expired":
+        await _notify(p.get(acc.P_SPONSOR, ""),
+                      f"{name} 的账号已于 {p.get(acc.P_EXPIRES)} 到期,已停用。"
+                      "如需继续使用请联系管理员续期(续期后对方要重新申请各应用)。")
+    elif reason in ("account_invalid", "sponsor_left"):
+        why = "登记信息异常" if reason == "account_invalid" else "的负责人已停用"
+        await _notify(settings.approver_feishu_id(),
+                      f"受管账号 {name}({user['id']}){why},账号已停用。需要保留的请修正登记信息或换负责人后续期。")
+    return True
+
+
+async def _maybe_remind(client, user: dict, on) -> None:
+    stage = acc.reminder_due(user, on, settings.account_remind_days())
+    if stage is None:
+        return
+    from even_auth_gov.feishu import build_account_renew_card, send_card
+    p = acc.props(user)
+    card = build_account_renew_card(user["id"], acc.display_name(user), acc.KINDS.get(p.get(acc.P_KIND), ""),
+                                    p.get(acc.P_EXPIRES, ""), acc.days_left(user, on), settings.account_renew_days())
+    try:
+        ok = bool(await send_card(p.get(acc.P_SPONSOR, ""), card))
+    except Exception as e:
+        logger.warning("续期提醒发送异常 %s: %s", user["id"], e)
+        ok = False
+    if not ok:
+        logger.warning("续期提醒发送失败 %s(下次扫描重试)", user["id"])
+        return
+    if await ca.set_properties(client, user["id"], {acc.P_REMINDED: f"{p.get(acc.P_EXPIRES)}:{stage}"}):
+        log_event("reminded", user, "system", detail=str(stage))
+
+
+async def renew(client, user_or_ref, actor: str, expires: str = "") -> dict:
+    """续期。不给 expires 时按 ACCOUNT_RENEW_DAYS 延长(不超过上限)。
+    账号停用中而且负责人确认过的,同时重新启用,并放开它的审批记录允许重新申请。"""
+    user = user_or_ref if isinstance(user_or_ref, dict) else await _resolve_user(client, user_or_ref)
+    if not acc.is_managed(user):
+        raise AccountError("不是受管账号")
+    p, on = acc.props(user), acc.today()
+    if p.get(acc.P_KIND) not in acc.KINDS or not acc.sponsor_ok(user):
+        raise AccountError("登记信息不完整(类型或负责人),先修正再续期")
+    if p.get(acc.P_REJECTED):
+        raise AccountError("负责人拒绝过,不能续期;请先换负责人(transfer)")
+    if expires:
+        exp = acc.parse_date(expires)
+        err = acc.expiry_error(exp, on, settings.account_max_days())
+        if err:
+            raise AccountError(err)
+    else:
+        exp = acc.renewed_expiry(acc.expires_of(user), on, settings.account_renew_days(), settings.account_max_days())
+    will_enable = bool(user.get("isForbidden") and p.get(acc.P_CONFIRMED))
+    if will_enable:
+        sponsor = await ca.get_user(client, p[acc.P_SPONSOR])
+        if not sponsor or sponsor.get("isForbidden"):
+            raise AccountError("负责人已停用或查不到,先换负责人(transfer)再续期")
+    updates = {acc.P_EXPIRES: exp.isoformat(), acc.P_REMINDED: None}
+    if not await ca.set_properties(client, user["id"], updates):
+        raise AccountError("写入到期日失败(Casdoor)")
+    user = {**user, "properties": _merged(user, updates)}
+    reopened = 0
+    if will_enable:
+        if not await ca.enable_user(client, user["id"]):
+            raise AccountError("到期日已更新,但启用账号失败(Casdoor),请重试")
+        from even_auth_gov import approval_store
+        reopened = approval_store.reopen_after_renewal(user["id"])
+    log_event("renewed", user, actor, detail="re-enabled" if will_enable else "")
+    return {"expires": exp.isoformat(), "enabled": will_enable, "reopened": reopened}

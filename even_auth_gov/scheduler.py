@@ -2,7 +2,8 @@
 - 每日对账(reconcile.run,SSO_RECONCILE_CRON,默认每天 08:00):兜底飞书离职事件遗漏;
   跑完再做一遍权限核对(access_report.alert),高/中级异常推给全局审批人(ACCESS_REPORT_ALERT=false 关);
 - 待批扫描(reconcile.sweep_pending,SSO_PENDING_SWEEP_CRON,默认每小时第 30 分):
-  补发没送达的审批卡片、催办、超时升级 —— 不必等到第二天对账。
+  补发没送达的审批卡片、催办、超时升级 —— 不必等到第二天对账;随后做受管账号扫描
+  (里程碑 4a:到期停用、续期提醒、负责人已停用)。
 
 Module-level singleton AsyncIOScheduler; timezone from SCHEDULER_TIMEZONE (default Asia/Shanghai).
 """
@@ -55,10 +56,17 @@ async def _run_reconcile_job() -> None:
 
 
 async def _run_pending_job() -> None:
-    """Job body: 待批补发/催办/超时升级(不碰 Casdoor,只读写审批库 + 发飞书卡片)。"""
-    from even_auth_gov import reconcile
+    """Job body: 待批补发/催办/超时升级,然后受管账号扫描(到期停用、续期提醒、负责人已停用)。
+    账号扫描失败只记日志,不影响待批扫描。"""
+    import httpx
+    from even_auth_gov import account_lifecycle, reconcile, settings
 
     await reconcile.sweep_pending()
+    try:
+        async with httpx.AsyncClient(base_url=settings.casdoor_endpoint()) as client:
+            await account_lifecycle.sweep(client)
+    except Exception as e:
+        logger.warning("受管账号扫描失败: %s", e)
 
 
 def is_running() -> bool:

@@ -173,3 +173,12 @@ def test_cli_validation_error_exits_2(monkeypatch, tmp_path, capsys):
     code = acc.main(["create", "--kind", "partner", "--name", "张三", "--email", "z@p.com",
                      "--sponsor", "boss@e.com", "--expires", "2020-01-01"])
     assert code == 2 and "早于今天" in capsys.readouterr().err
+
+
+def test_cli_renew(monkeypatch, tmp_path, capsys):
+    fc = _cli_env(monkeypatch, tmp_path)
+    fc.add(id="x_1", email="z@p.com", properties={"evauth_kind": "partner", "evauth_sponsor": "ou_boss",
+           "evauth_expires": (acc.today() + timedelta(days=5)).isoformat(), "evauth_confirmed_at": "t"})
+    target = (acc.today() + timedelta(days=60)).isoformat()
+    assert acc.main(["renew", "--user", "z@p.com", "--expires", target]) == 0
+    assert fc.props("x_1")["evauth_expires"] == target and target in capsys.readouterr().out
