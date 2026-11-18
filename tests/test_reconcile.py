@@ -235,3 +235,21 @@ def test_reconcile_runs_account_sweep_after_pending_sweep(monkeypatch, tmp_path)
     monkeypatch.setattr(account_lifecycle, "sweep", fake_accounts)
     asyncio.run(reconcile.run(client=None))
     assert order[:2] == ["pending", "accounts"]
+
+
+def test_reconcile_checks_sponsors_who_have_no_app_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPROVAL_STORE_FILE", str(tmp_path / "a.json"))
+    from even_auth_gov import account_lifecycle
+    async def fake_sponsors(client): return ["ou_sponsor"]
+    async def fake_members(client): return []
+    async def no_sweep(client): pass
+    async def fake_status(open_id): return _status(is_resigned=True)
+    disabled = []
+    async def fake_apply(open_id, name, reason, client): disabled.append(open_id); return True
+    monkeypatch.setattr(account_lifecycle, "active_sponsors", fake_sponsors)
+    monkeypatch.setattr(account_lifecycle, "sweep", no_sweep)
+    monkeypatch.setattr("even_auth_gov.casdoor_admin.list_approved_feishu_members", fake_members)
+    monkeypatch.setattr(reconcile, "fetch_feishu_status", fake_status)
+    monkeypatch.setattr(reconcile.offboard, "apply", fake_apply)
+    asyncio.run(reconcile.run(client=None))
+    assert disabled == ["ou_sponsor"]

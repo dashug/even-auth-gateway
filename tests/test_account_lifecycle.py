@@ -346,3 +346,43 @@ def test_renew_does_not_enable_unconfirmed_created_account(env):
     r = create(env)
     run(env["fc"], lambda c: lc.renew(c, r["user_id"], actor="admin"))
     assert env["fc"].users[r["user_id"]]["isForbidden"] is True
+
+
+# ── 负责人离职 ──
+
+from even_auth_gov import offboard
+
+
+def test_offboarding_a_sponsor_disables_their_accounts(env):
+    active(env, uid="x_a")
+    active(env, uid="x_b")
+    active(env, uid="x_c", sponsor="ou_other")
+    ok = run(env["fc"], lambda c: offboard.apply("ou_boss", "李四", "offboard_event", c))
+    users = env["fc"].users
+    assert ok is True and users["ou_boss"]["isForbidden"]
+    assert users["x_a"]["isForbidden"] and users["x_b"]["isForbidden"] and not users["x_c"]["isForbidden"]
+    summary = [t for to, t in env["sent"]["texts"] if to == "ou_root"]
+    assert len(summary) == 1 and "李四" in summary[0] and "受管x_a" in summary[0] and "受管x_b" in summary[0]
+    assert {e["user_id"] for e in events(env) if e["event"] == "sponsor_left"} == {"x_a", "x_b"}
+
+
+def test_cascade_failure_does_not_change_offboard_result(env):
+    active(env)
+    env["fc"].fail.add("/api/get-users")
+    assert run(env["fc"], lambda c: offboard.apply("ou_boss", "李四", "offboard_event", c)) is True
+    assert env["fc"].users["x_a"]["isForbidden"] is False   # 每小时扫描兜底
+
+
+def test_offboarding_a_managed_account_does_not_cascade(env):
+    active(env)
+    run(env["fc"], lambda c: offboard.apply("x_a", "受管x_a", "account_expired", c))
+    assert not [t for to, t in env["sent"]["texts"] if to == "ou_root"]
+
+
+def test_active_sponsors(env):
+    active(env, uid="x_a")
+    active(env, uid="x_b", sponsor="ou_other")
+    env["fc"].users["x_b"]["isForbidden"] = True                # 停用账号的负责人不算
+    env["fc"].users["ou_gone"] = {**env["fc"].users["ou_other"], "id": "ou_gone", "isForbidden": True}
+    active(env, uid="x_c", sponsor="ou_gone")                   # 已停用的负责人不算(扫描会处理)
+    assert run(env["fc"], lc.active_sponsors) == ["ou_boss"]

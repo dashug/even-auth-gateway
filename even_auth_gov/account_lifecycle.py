@@ -1,7 +1,7 @@
 """受管账号的生命周期操作(会读写 Casdoor、发飞书)—— 里程碑 4a。
 
 建号 create、纳管 register、负责人确认/拒绝/续期按钮(handle_action)、重发确认卡片、
-到期扫描与续期提醒(sweep)、续期(renew)。
+到期扫描与续期提醒(sweep)、续期(renew)、负责人离职连带停用(cascade_sponsor / active_sponsors)。
 规则在 accounts.py;卡片样式在 feishu.py;卡片按钮由 feishu_ws 转到 handle_action。
 停用一律走 offboard.apply(重试 + 告警 + 清准入组和角色)。变更历史追加写到 account_events.jsonl,写失败只记日志。
 """
@@ -365,3 +365,52 @@ async def renew(client, user_or_ref, actor: str, expires: str = "") -> dict:
         reopened = approval_store.reopen_after_renewal(user["id"])
     log_event("renewed", user, actor, detail="re-enabled" if will_enable else "")
     return {"expires": exp.isoformat(), "enabled": will_enable, "reopened": reopened}
+
+
+# ── 负责人离职 ──
+
+async def cascade_sponsor(sponsor_id: str, sponsor_name: str, client) -> list[str]:
+    """负责人被停用后,停用他名下所有启用中的受管账号(原因 sponsor_left),并给全局审批人发一条汇总。
+    返回停用成功的账号名。读不到用户列表就放弃 —— 每小时扫描会按"负责人已停用"兜底。"""
+    users = await ca.list_users(client)
+    if users is None:
+        logger.warning("连带停用跳过:读不到 Casdoor 用户列表(负责人 %s),每小时扫描会兜底", sponsor_id)
+        return []
+    targets = [u for u in users if acc.is_managed(u) and not u.get("isForbidden")
+               and acc.props(u).get(acc.P_SPONSOR) == sponsor_id]
+    if not targets:
+        return []
+    from even_auth_gov import offboard
+    done, failed = [], []
+    for user in targets:
+        name = acc.display_name(user)
+        if await offboard.apply(user["id"], name, "sponsor_left", client):
+            log_event("sponsor_left", user, "system", detail=sponsor_id)
+            done.append(name)
+        else:
+            failed.append(name)
+    lines = [f"负责人 {sponsor_name or sponsor_id} 已停用,名下 {len(targets)} 个受管账号已处理:"]
+    if done:
+        lines.append("已停用:" + "、".join(done))
+    if failed:
+        lines.append("停用失败(已另行告警):" + "、".join(failed))
+    lines.append("需要保留的账号:python -m even_auth_gov.accounts transfer 换负责人,确认后再 renew 续期。")
+    await _notify(settings.approver_feishu_id(), "\n".join(lines))
+    return done
+
+
+async def active_sponsors(client) -> list[str]:
+    """启用中的受管账号的负责人(只取启用中的飞书账号)。每日对账把他们纳入飞书在职检查 ——
+    负责人自己可能不在任何准入组里,原来的对账查不到他。"""
+    users = await ca.list_users(client)
+    if not users:
+        return []
+    by_id = {u.get("id"): u for u in users}
+    out = set()
+    for user in users:
+        if acc.is_managed(user) and not user.get("isForbidden"):
+            sid = acc.props(user).get(acc.P_SPONSOR, "")
+            sponsor = by_id.get(sid)
+            if sid.startswith("ou_") and sponsor and not sponsor.get("isForbidden"):
+                out.add(sid)
+    return sorted(out)
