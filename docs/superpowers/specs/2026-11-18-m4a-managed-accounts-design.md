@@ -37,6 +37,7 @@
 | `evauth_rejected_at` | 负责人拒绝时间 | ISO 8601 |
 | `evauth_reminded` | 已发的续期提醒,`<到期日>:<提前天数>`;续期后到期日变了,提醒自然重新开始 | 如 `2027-02-01:14` |
 | `evauth_sponsor_pending` | 换负责人时,等待确认的新负责人(4.6) | 飞书 open_id |
+| `evauth_origin` | `created`(命令行新建,确认后启用)/ `registered`(纳管存量账号,确认不改启停) | 字符串 |
 
 **规则**(`accounts.py`,纯函数,传入 `today` 以便测试):
 
@@ -70,7 +71,7 @@ python -m even_auth_gov.accounts create --kind partner --name 张三 --email a@x
    - 人员账号首次登录强制改密码(实测 S2),`service` 不强制。
 3. 给负责人发**确认卡片**:"管理员为 张三(a@x.com,外部合作方)建了账号,登记你为负责人,有效期至 2027-02-01",下面是【确认负责】和【拒绝】两个按钮。
    - 确认 → 写 `evauth_confirmed_at`。命令行新建的账号此时启用;如果确认时已经过了到期日,就不启用,并提示管理员续期。用 `register` 纳管的账号,确认不改启停状态;
-   - 拒绝 → 写 `evauth_rejected_at`,账号保持停用;
+   - 拒绝 → 写 `evauth_rejected_at`。新建的账号保持停用;纳管的账号如果还启用着,立即走 `offboard.apply(reason="sponsor_rejected")` 停用(没人负责的账号不留着);
    - 点按钮时按 Casdoor 实时数据核对,**操作人必须是当前 `evauth_sponsor`**。
    - 卡片发送失败:命令行提示失败,管理员可以用 `accounts resend-confirm --user` 重发。
 4. 账号启用后,对方登录应用,走现有的应用审批。审批卡片上多一行:`外部合作方 · 负责人 李四 · 有效期至 2027-02-01`。
@@ -91,6 +92,7 @@ python -m even_auth_gov.accounts create --kind partner --name 张三 --email a@x
 
 - **已过期或数据异常** → `offboard.apply(user_id, name, reason="account_expired" | "account_invalid")`:停账号、清准入组、撤角色、审批记录置为 disabled,失败重试并告警(PRD F-5.4.4)。然后通知负责人。
 - **负责人在 Casdoor 里查不到或已停用** → `offboard.apply(..., reason="sponsor_left")`。这是负责人离职连带停用的第二道保险(第一道见 4.5)。
+- **负责人拒绝过但账号还启用着** → `offboard.apply(..., reason="sponsor_rejected")`(拒绝时已立即停用,这里兜底)。
 - **到期前提醒**:取 `ACCOUNT_REMIND_DAYS`(默认 `14,3`)里满足 `days_left <= d` 的**最小** d。如果 `evauth_reminded` 记录的是本次到期日,而且记录的档位 ≤ d,就不发;否则给负责人发**续期卡片**,然后把 `evauth_reminded` 写成 `<到期日>:<d>`。这样只发一张,不会同时发 14 天和 3 天两张;剩 2 天时才首次扫到,也只发 3 天那档。
   - 卡片内容:"张三 的账号将于 2027-02-01 到期",下面是【续期 90 天】和【不再续期】两个按钮。
   - 续期:`新到期日 = min(max(today, 原到期日) + ACCOUNT_RENEW_DAYS, today + ACCOUNT_MAX_DAYS)`。
@@ -98,7 +100,7 @@ python -m even_auth_gov.accounts create --kind partner --name 张三 --email a@x
   - 只认当前负责人。管理员用 `accounts renew --user [--expires]` 续期。
 - 发卡失败不写 `evauth_reminded`,下一小时重试。
 
-**到期后再续期**:`accounts renew` 写新到期日并启用账号。准入组和角色在停用时已经清掉,要重新走各应用的审批。现在审批库对 `disabled` 记录不允许重新申请(`approval_store.mark_pending` 只放行无记录或 `denied`),所以重新启用时,把这个账号原因为 `account_expired / account_invalid / sponsor_left` 的 disabled 记录改成新状态 `expired`,并把 `expired` 加进允许重新申请的状态。
+**到期后再续期**:`accounts renew` 写新到期日并启用账号。准入组和角色在停用时已经清掉,要重新走各应用的审批。现在审批库对 `disabled` 记录不允许重新申请(`approval_store.mark_pending` 只放行无记录或 `denied`),所以重新启用时,把这个账号原因为 `account_expired / account_invalid / sponsor_left / sponsor_rejected` 的 disabled 记录改成新状态 `expired`,并把 `expired` 加进允许重新申请的状态。
 
 ### 4.4 闸门(同时修复 1.1 的风险)
 
@@ -162,14 +164,14 @@ python -m even_auth_gov.accounts create --kind partner --name 张三 --email a@x
 | 严重度 | kind | 条件 |
 |---|---|---|
 | 高 | `unregistered_with_access` | 非 `ou_`、没有 `evauth_kind`、启用中,而且有准入组或角色 |
-| 高 | `expired_but_enabled` | 已过期或数据异常,但还启用着 |
+| 高 | `lapsed_but_enabled` | 已过期、登记信息异常或负责人拒绝,但还启用着 |
 | 高 | `sponsor_gone_but_enabled` | 负责人在 Casdoor 里查不到或已停用,但账号还启用着 |
 | 中 | `unregistered_account` | 非 `ou_`、没有 `evauth_kind`、启用中、没有准入 |
-| 中 | `invalid_account_metadata` | 登记了但属性不完整或格式不对 |
+| 中 | `invalid_account_metadata` | 已停用的受管账号登记信息不完整或格式不对(启用中的归 `lapsed_but_enabled`),续期前要先修正 |
 | 提示 | `expiring_soon` | 有效,`max(ACCOUNT_REMIND_DAYS)` 天内到期 |
-| 提示 | `awaiting_sponsor` | 没确认也没拒绝,超过 7 天 |
+| 提示 | `awaiting_sponsor` | 负责人没确认也没拒绝 |
 
-**审计**:账号的当前状态在 Casdoor。变更历史追加写到 `account_events.jsonl`(`ACCOUNT_EVENTS_FILE`,默认和 `APPROVAL_STORE_FILE` 在同一目录),每行一个 JSON:`ts, event, user_id, name, email, kind, sponsor, expires, actor, detail`。事件包括:`created / registered / confirmed / rejected / renewed / no_renew / transfer_requested / transferred / password_set / expired / invalid / sponsor_left`。这个文件丢了只会丢历史,账号的回收依据还在。
+**审计**:账号的当前状态在 Casdoor。变更历史追加写到 `account_events.jsonl`(`ACCOUNT_EVENTS_FILE`,默认和 `APPROVAL_STORE_FILE` 在同一目录),每行一个 JSON:`ts, event, user_id, name, email, kind, sponsor, expires, actor, detail`。事件包括:`created / registered / confirmed / rejected / reminded / renewed / no_renew / transfer_requested / transferred / transfer_rejected / password_set / expired / invalid / sponsor_left / rejected_disabled`。这个文件丢了只会丢历史,账号的回收依据还在。
 
 **新增配置**(`gov.env.example`):`ACCOUNT_MAX_DAYS=180`、`ACCOUNT_RENEW_DAYS=90`、`ACCOUNT_REMIND_DAYS=14,3`、`ACCOUNT_EVENTS_FILE`(可选)。
 
