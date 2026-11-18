@@ -69,3 +69,23 @@ def test_export_includes_escalation_trail(monkeypatch, tmp_path):
     audit_export.export_csv(buf)
     row = _rows(buf.getvalue())[0]
     assert row["escalated_to"] == "ou_esc" and row["escalated_at"] and row["approved_by"] == "ou_esc"
+
+
+def test_export_account_events(monkeypatch, tmp_path):
+    import csv, io, json
+    from even_auth_gov import audit_export
+    path = tmp_path / "account_events.jsonl"
+    monkeypatch.setenv("ACCOUNT_EVENTS_FILE", str(path))
+    path.write_text(json.dumps({"ts": "t1", "event": "created", "user_id": "x_1", "name": "张三", "actor": "admin"},
+                               ensure_ascii=False) + "\n" + '{"ts": "t2", "event": "conf' + "\n", encoding="utf-8")  # 第二行是半行
+    out = io.StringIO()
+    assert audit_export.export_account_events(out) == 1
+    rows = list(csv.DictReader(io.StringIO(out.getvalue())))
+    assert list(rows[0]) == audit_export.EVENT_COLUMNS and rows[0]["event"] == "created" and rows[0]["name"] == "张三"
+
+
+def test_export_account_events_when_file_missing(monkeypatch, tmp_path):
+    import io
+    from even_auth_gov import audit_export
+    monkeypatch.setenv("ACCOUNT_EVENTS_FILE", str(tmp_path / "none.jsonl"))
+    assert audit_export.export_account_events(io.StringIO()) == 0

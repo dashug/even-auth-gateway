@@ -51,7 +51,7 @@ def test_rows_join_casdoor_groups_roles_and_approval_trail(env):
     rows, _ = ar.build(_snap(users, roles))
     assert rows == [{
         "name": "Alice", "open_id": "ou_alice", "email": "a@e.com", "app": "app-a", "account": "enabled",
-        "has_access": "yes", "roles": "编辑者", "approval_status": "approved", "approved_by": "ou_boss",
+        "kind": "飞书员工", "sponsor": "", "expires": "", "has_access": "yes", "roles": "编辑者", "approval_status": "approved", "approved_by": "ou_boss",
         "approved_at": rows[0]["approved_at"], "source": "approval",
     }]
     assert rows[0]["approved_at"]
@@ -262,3 +262,67 @@ def test_alert_caps_listed_items(env, monkeypatch):
     assert asyncio.run(ar.alert(client=None)) == 15
     text = sent[0][1]
     assert "15" in text and text.count("ou_d") == ar.ALERT_MAX_ITEMS
+
+
+# ── 里程碑 4a:非飞书账号 ──
+
+from datetime import date
+
+D = date(2026, 11, 18)
+
+
+def _managed(oid, groups=(), forbidden=False, **props):
+    p = {"evauth_kind": "partner", "evauth_sponsor": "ou_boss", "evauth_expires": "2026-12-31",
+         "evauth_confirmed_at": "2026-11-01T00:00:00+00:00"}
+    p.update(props)
+    return {**_user(oid, oid, groups=groups, forbidden=forbidden),
+            "properties": {k: v for k, v in p.items() if v is not None}}
+
+
+def _account_kinds(users, roles=()):
+    _, anomalies = ar.build(_snap(users, list(roles)), today=D)
+    return {(a["kind"], a["open_id"]): a["severity"] for a in anomalies
+            if a["kind"] not in ("access_without_approval",)}
+
+
+def test_managed_and_unregistered_account_anomalies(env):
+    boss = _user("ou_boss", "boss")
+    users = [
+        boss,
+        _user("uuid-stranger", "s1", groups=["approved-app-a"]),            # 未登记 + 有准入
+        _user("uuid-idle", "s2"),                                            # 未登记,没准入
+        _user("uuid-off", "s3", forbidden=True),                             # 未登记但已停用:不报
+        _managed("x_expired", evauth_expires="2026-11-17"),
+        _managed("x_rejected", evauth_rejected_at="2026-11-02T00:00:00+00:00"),
+        _managed("x_bad", evauth_kind="vendor"),
+        _managed("x_bad_off", forbidden=True, evauth_kind="vendor"),
+        _managed("x_orphan", evauth_sponsor="ou_ghost"),
+        _managed("x_soon", evauth_expires="2026-11-25"),
+        _managed("x_wait", forbidden=True, evauth_confirmed_at=None),
+        _managed("x_fine", evauth_expires="2027-01-31"),
+    ]
+    assert _account_kinds(users) == {
+        ("unregistered_with_access", "uuid-stranger"): "high",
+        ("unregistered_account", "uuid-idle"): "medium",
+        ("lapsed_but_enabled", "x_expired"): "high",
+        ("lapsed_but_enabled", "x_rejected"): "high",
+        ("lapsed_but_enabled", "x_bad"): "high",
+        ("invalid_account_metadata", "x_bad_off"): "medium",
+        ("sponsor_gone_but_enabled", "x_orphan"): "high",
+        ("expiring_soon", "x_soon"): "info",
+        ("awaiting_sponsor", "x_wait"): "info",
+    }
+
+
+def test_sponsor_disabled_counts_as_gone(env):
+    users = [_user("ou_boss", "boss", forbidden=True), _managed("x_a")]
+    assert _account_kinds(users) == {("sponsor_gone_but_enabled", "x_a"): "high"}
+
+
+def test_view_rows_carry_kind_sponsor_and_expiry(env):
+    users = [_user("ou_boss", "boss", display="李四"), _managed("x_a", groups=["approved-app-a"]),
+             _user("ou_emp", "emp", groups=["approved-app-a"])]
+    rows, _ = ar.build(_snap(users, []), today=D)
+    by_id = {r["open_id"]: r for r in rows}
+    assert (by_id["x_a"]["kind"], by_id["x_a"]["sponsor"], by_id["x_a"]["expires"]) == ("外部合作方", "李四", "2026-12-31")
+    assert (by_id["ou_emp"]["kind"], by_id["ou_emp"]["sponsor"], by_id["ou_emp"]["expires"]) == ("飞书员工", "", "")

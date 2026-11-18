@@ -5,7 +5,8 @@
 
 两种输出:
 - 视图:每个"人 × 应用"一行(有准入组、有该应用角色、或审批库有记录的都算);
-- 核对:需要处理的异常,按严重程度排序(见 KINDS)。
+- 核对:需要处理的异常,按严重程度排序(见 KINDS)。非飞书账号:未登记的、已过期 / 负责人拒绝 /
+  负责人已停用却仍启用的受管账号都会报出(里程碑 4a)。
 
 用法(环境变量同治理服务;容器里用 docker compose exec 跑,读同一份审批库):
     python -m even_auth_gov.access_report -o access.csv              # 视图
@@ -23,11 +24,11 @@ import logging
 import sys
 from typing import IO
 
-from even_auth_gov import approval_store, casdoor_admin as ca, settings
+from even_auth_gov import accounts as acc, approval_store, casdoor_admin as ca, settings
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = ["name", "open_id", "email", "app", "account", "has_access", "roles",
+COLUMNS = ["name", "open_id", "email", "app", "account", "kind", "sponsor", "expires", "has_access", "roles",
            "approval_status", "approved_by", "approved_at", "source"]
 ANOMALY_COLUMNS = ["severity", "kind", "name", "open_id", "app", "detail"]
 
@@ -36,13 +37,20 @@ ANOMALY_COLUMNS = ["severity", "kind", "name", "open_id", "app", "detail"]
 KINDS = {
     "offboarded_but_enabled": ("high", "离职流程处理过(或禁用失败),但 Casdoor 账号是启用的"),
     "departed_but_enabled": ("high", "飞书显示已离职/冻结/已删除,但 Casdoor 账号是启用的"),
+    "unregistered_with_access": ("high", "非飞书账号,没有登记负责人和到期日,却有准入或角色"),
+    "lapsed_but_enabled": ("high", "受管账号已过期、登记信息异常或负责人拒绝,但还启用着"),
+    "sponsor_gone_but_enabled": ("high", "受管账号的负责人已停用或已不在 Casdoor,但账号还启用着"),
     "disabled_with_access": ("medium", "账号已停用但仍挂着准入组/角色,一旦被重新启用会直接恢复访问"),
     "role_without_access": ("medium", "有该应用角色但没有准入组(残余角色)"),
     "access_without_role": ("medium", "该应用分了角色,此人有准入却没有角色"),
     "feishu_check_failed": ("medium", "查不到飞书在职状态(常见原因:通讯录权限范围没覆盖此人),对账会一直跳过他"),
+    "unregistered_account": ("medium", "非飞书账号,没有登记负责人和到期日(启用中,暂无准入)"),
+    "invalid_account_metadata": ("medium", "已停用的受管账号登记信息不完整或格式不对,续期前要先修正"),
     "access_without_approval": ("info", "有准入组但没有经网关审批的记录(迁移或后台手工授权)"),
     "approved_but_no_access": ("info", "审批库记为已批准,但 Casdoor 里没有准入组(被人手工移出?)"),
     "record_user_missing": ("info", "审批库有记录,但 Casdoor 里已没有这个用户"),
+    "expiring_soon": ("info", "受管账号即将到期"),
+    "awaiting_sponsor": ("info", "受管账号等负责人确认"),
 }
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "info": 2}
 ALERT_MAX_ITEMS = 10
@@ -74,10 +82,54 @@ def _sorted(anomalies: list[dict]) -> list[dict]:
     return sorted(anomalies, key=lambda a: (_SEVERITY_ORDER[a["severity"]], a["kind"], a["open_id"], a["app"]))
 
 
-def build(snap: dict) -> tuple[list[dict], list[dict]]:
-    """(视图行, 异常)。纯函数,只看 snapshot。"""
+def _account_anomalies(u: dict, name: str, oid: str, enabled: bool, has_any: bool, by_id: dict,
+                       on, remind_max: int) -> list[dict]:
+    """非飞书账号的核对(里程碑 4a)。飞书账号返回 []。"""
+    if acc.is_feishu(u):
+        return []
+    if not acc.is_managed(u):
+        if not enabled:
+            return []
+        return [_anomaly("unregistered_with_access" if has_any else "unregistered_account", name, oid)]
+    p = acc.props(u)
+    if not acc.metadata_ok(u):
+        return [_anomaly("lapsed_but_enabled" if enabled else "invalid_account_metadata", name, oid, extra="登记信息异常")]
+    out = []
+    left = acc.days_left(u, on)
+    if enabled and left < 0:
+        out.append(_anomaly("lapsed_but_enabled", name, oid, extra=f"{p.get(acc.P_EXPIRES)} 到期"))
+    elif enabled and p.get(acc.P_REJECTED):
+        out.append(_anomaly("lapsed_but_enabled", name, oid, extra="负责人已拒绝"))
+    sponsor = by_id.get(p.get(acc.P_SPONSOR))
+    if enabled and (sponsor is None or sponsor.get("isForbidden")):
+        out.append(_anomaly("sponsor_gone_but_enabled", name, oid, extra=p.get(acc.P_SPONSOR, "")))
+    if not p.get(acc.P_CONFIRMED) and not p.get(acc.P_REJECTED):
+        out.append(_anomaly("awaiting_sponsor", name, oid))
+    elif enabled and 0 <= left <= remind_max:
+        out.append(_anomaly("expiring_soon", name, oid, extra=f"{left} 天后到期"))
+    return out
+
+
+def _account_columns(u: dict, by_id: dict) -> dict:
+    """视图里的类型 / 负责人 / 到期日三列(里程碑 4a)。"""
+    if acc.is_feishu(u):
+        return {"kind": "飞书员工", "sponsor": "", "expires": ""}
+    if not acc.is_managed(u):
+        return {"kind": "未登记", "sponsor": "", "expires": ""}
+    p = acc.props(u)
+    sponsor = by_id.get(p.get(acc.P_SPONSOR))
+    return {"kind": acc.KINDS.get(p.get(acc.P_KIND), p.get(acc.P_KIND, "")),
+            "sponsor": acc.display_name(sponsor) if sponsor else p.get(acc.P_SPONSOR, ""),
+            "expires": p.get(acc.P_EXPIRES, "")}
+
+
+def build(snap: dict, today=None) -> tuple[list[dict], list[dict]]:
+    """(视图行, 异常)。纯函数,只看 snapshot;today 不传则取当天(按 SCHEDULER_TIMEZONE)。"""
     prefix = f"{ca._org()}/approved-"
     users, roles, records = snap["users"], snap["roles"], snap["records"]
+    on = today or acc.today()
+    remind_max = max(settings.account_remind_days())
+    by_id = {u.get("id"): u for u in users}
 
     apps = set(settings.known_apps())
     for u in users:
@@ -116,6 +168,8 @@ def build(snap: dict) -> tuple[list[dict], list[dict]]:
                             if r.get("status") in ("disabled", "disable_failed"))
         if enabled and offboarded:
             anomalies.append(_anomaly("offboarded_but_enabled", name, oid, extra=", ".join(offboarded)))
+        anomalies += _account_anomalies(u, name, oid, enabled, bool(group_apps or role_map), by_id, on, remind_max)
+        account_cols = _account_columns(u, by_id)
 
         for app in sorted(group_apps | set(role_map) | set(recs)):
             has_access = app in group_apps
@@ -125,6 +179,7 @@ def build(snap: dict) -> tuple[list[dict], list[dict]]:
             rows.append({
                 "name": name, "open_id": oid, "email": u.get("email") or "", "app": app,
                 "account": "enabled" if enabled else "disabled",
+                **account_cols,
                 "has_access": "yes" if has_access else "no",
                 "roles": ", ".join(role_names),
                 "approval_status": rec.get("status", ""),

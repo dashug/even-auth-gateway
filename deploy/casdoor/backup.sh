@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Casdoor Postgres 备份 —— pg_dump 出整库(含所有身份/组/角色/应用配置),压缩留最近 N 份;
-# 治理服务在跑时顺带备份其审批库(审计留痕)。
+# 治理服务在跑时顺带备份其审批库和受管账号变更历史(审计留痕)。
 # 丢了这个卷 = 丢全部身份数据,所以务必 cron 每日跑,并把 backups/ 同步到异地/对象存储。
 #
 # 用法:  deploy/casdoor/backup.sh
@@ -28,8 +28,15 @@ if docker compose -f docker-compose.yml --profile gov ps --status running --serv
   GOV_OUT="$DIR/approvals-$TS.json.gz"
   docker compose -f docker-compose.yml --profile gov exec -T even-auth-gov cat /data/approvals.json | gzip > "$GOV_OUT"
   echo "backup -> $GOV_OUT ($(du -h "$GOV_OUT" | cut -f1))"
+  # 受管账号变更历史(里程碑 4a)——文件存在才备份。
+  if docker compose -f docker-compose.yml --profile gov exec -T even-auth-gov test -f /data/account_events.jsonl; then
+    EV_OUT="$DIR/account-events-$TS.jsonl.gz"
+    docker compose -f docker-compose.yml --profile gov exec -T even-auth-gov cat /data/account_events.jsonl | gzip > "$EV_OUT"
+    echo "backup -> $EV_OUT ($(du -h "$EV_OUT" | cut -f1))"
+  fi
 fi
 
 # 轮转:只保留最近 KEEP 份。
 ls -1t "$DIR"/casdoor-*.sql.gz 2>/dev/null | tail -n +"$((KEEP + 1))" | xargs -r rm -f
 ls -1t "$DIR"/approvals-*.json.gz 2>/dev/null | tail -n +"$((KEEP + 1))" | xargs -r rm -f
+ls -1t "$DIR"/account-events-*.jsonl.gz 2>/dev/null | tail -n +"$((KEEP + 1))" | xargs -r rm -f
