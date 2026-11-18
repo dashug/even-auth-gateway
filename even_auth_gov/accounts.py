@@ -150,3 +150,17 @@ def describe(user: dict | None, sponsor_name: str = "") -> str:
     p = props(user)
     kind = KINDS.get(p.get(P_KIND), p.get(P_KIND))
     return f"{kind} · 负责人 {sponsor_name or p.get(P_SPONSOR, '')} · 有效期至 {p.get(P_EXPIRES, '')}"
+
+
+async def gate(client, user_id: str) -> str:
+    """闸门:这个账号能不能进审批。'' = 放行;否则 REASONS 的键。
+    飞书账号(ou_)直接放行、不查 Casdoor —— 行为和以前完全一样。读不到 Casdoor 时不放行。"""
+    if str(user_id or "").startswith("ou_"):
+        return ""
+    from even_auth_gov import casdoor_admin as ca
+    user = await ca.get_user(client, user_id)
+    if user is None:
+        return "lookup_failed"
+    if user.get("isForbidden"):
+        return "disabled"
+    return eligibility(user, today())

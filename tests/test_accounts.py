@@ -107,3 +107,36 @@ def test_settings_parsing(monkeypatch):
 def test_today_survives_bad_timezone(monkeypatch):
     monkeypatch.setenv("SCHEDULER_TIMEZONE", "Nope/Nowhere")
     assert isinstance(acc.today(), date)
+
+
+# ── 闸门 ──
+
+import asyncio
+import httpx
+
+
+def _client_returning(data, status="ok"):
+    def handler(req):
+        return httpx.Response(200, json={"status": status, "data": data})
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://casdoor")
+
+
+def _gate(user_id, data=None, status="ok"):
+    async def run():
+        async with _client_returning(data, status) as c:
+            return await acc.gate(c, user_id)
+    return asyncio.run(run())
+
+
+def test_gate_lets_feishu_through_without_asking_casdoor():
+    assert asyncio.run(acc.gate(None, "ou_a")) == ""     # client=None:真去查会炸
+
+
+def test_gate_reasons():
+    far = (acc.today() + timedelta(days=30)).isoformat()
+    good = _ok(evauth_expires=far)
+    assert _gate("x_1", good) == ""
+    assert _gate("x_1", _u({})) == "unregistered"
+    assert _gate("x_1", {**good, "isForbidden": True}) == "disabled"
+    assert _gate("x_1", None) == "lookup_failed"                # 查不到
+    assert _gate("x_1", None, status="error") == "lookup_failed"

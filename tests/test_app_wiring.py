@@ -5,7 +5,7 @@ from tests._jwt import APP_CLIENT_IDS, CID_C, OTHER_KEY, jwks, token
 
 
 def _fake_casdoor(monkeypatch, roles=None, jwks_status=200, roles_ok=True, user_groups=None,
-                  forbidden=False, user_ok=True):
+                  forbidden=False, user_ok=True, users=None):
     """把 casdoor_admin.make_client 换成内存假 Casdoor:提供 JWKS、get-user(账号实时状态)与 get-roles。"""
     from even_auth_gov import id_token
     id_token.clear_cache()
@@ -17,9 +17,11 @@ def _fake_casdoor(monkeypatch, roles=None, jwks_status=200, roles_ok=True, user_
         if req.url.path == "/api/get-user":
             if not user_ok:
                 return httpx.Response(200, json={"status": "error", "msg": "boom", "data": None})
-            return httpx.Response(200, json={"status": "ok", "data": {
-                "owner": "even-test", "name": "randname", "id": req.url.params.get("userId"),
-                "groups": user_groups or [], "isForbidden": forbidden}})
+            uid = req.url.params.get("userId")
+            data = {"owner": "even-test", "name": "randname", "id": uid,
+                    "groups": user_groups or [], "isForbidden": forbidden}
+            data.update((users or {}).get(uid, {}))   # users:按 id 覆盖字段(如受管账号的 properties)
+            return httpx.Response(200, json={"status": "ok", "data": data})
         if req.url.path == "/api/get-roles":
             if not roles_ok:
                 return httpx.Response(200, json={"status": "error", "msg": "boom", "data": None})
@@ -302,3 +304,39 @@ def test_healthz_reports_ok_and_background_components(monkeypatch, tmp_path):
         r = c.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "feishu_ws": False, "scheduler": False}
+
+
+# ── 里程碑 4a:非飞书账号闸门 ──
+
+from datetime import timedelta
+
+
+def _managed_props(days=30, **over):
+    from even_auth_gov import accounts
+    p = {"evauth_kind": "partner", "evauth_sponsor": "ou_boss",
+         "evauth_expires": (accounts.today() + timedelta(days=days)).isoformat(),
+         "evauth_confirmed_at": "2026-11-01T00:00:00+00:00"}
+    p.update(over)
+    return p
+
+
+def test_request_access_rejects_unregistered_non_feishu_account(monkeypatch, tmp_path):
+    app = _app(monkeypatch, tmp_path)
+    with TestClient(app) as c:
+        r = _ra(c, token(sub="uuid-stranger"))
+    assert r.status_code == 403 and "未登记" in r.json()["error"]
+    from even_auth_gov import approval_store
+    assert approval_store.get("uuid-stranger", "app-b") is None
+
+
+def test_request_access_rejects_expired_managed_account(monkeypatch, tmp_path):
+    app = _app(monkeypatch, tmp_path, users={"x_ext": {"properties": _managed_props(days=-1)}})
+    with TestClient(app) as c:
+        assert _ra(c, token(sub="x_ext")).status_code == 403
+
+
+def test_request_access_accepts_eligible_managed_account(monkeypatch, tmp_path):
+    app = _app(monkeypatch, tmp_path, users={"x_ext": {"properties": _managed_props()}})
+    with TestClient(app) as c:
+        r = _ra(c, token(sub="x_ext"))
+    assert r.status_code == 200 and r.json() == {"status": "ok", "app": "app-b"}

@@ -10,7 +10,7 @@ APP-AWARE(设计评审 #2 #16):准入组按应用区分 —— f"approved-{app}"
 拒绝时连同该应用的角色一起撤(离职则由 offboard 撤全部角色),不留"有角色没准入"的残余。"""
 from __future__ import annotations
 import logging
-from even_auth_gov import casdoor_admin as ca, approval_store, settings
+from even_auth_gov import accounts, casdoor_admin as ca, approval_store, settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,17 @@ async def handle(action: str, operator_id: str, owner: str, sso_open_id: str, ap
     name = rec.get("name", "") or sso_open_id
     if rec.get("status") != "pending":
         return {"status": "ok", "message": f"{name} 的申请已处理过: {rec.get('status')}"}
+    if action == "sso_approve" and not sso_open_id.startswith("ou_"):
+        # 里程碑 4a 闸门(纵深防御):非飞书账号按 Casdoor 实时数据核对,不合格就系统拒绝,
+        # 免得这条申请挂在待批里被反复催办。
+        reason = await accounts.gate(client, sso_open_id)
+        if reason == "lookup_failed":
+            return {"status": "error", "message": f"批准 {name} 失败:暂时查不到该账号在 Casdoor 的状态,申请仍待批,请稍后再点一次"}
+        if reason:
+            approval_store.mark_denied(sso_open_id, app, "system", reason=f"ineligible:{reason}")
+            logger.warning("SSO approve blocked: %s app=%s ineligible (%s)", sso_open_id, app, reason)
+            return {"status": "ok", "decision": "denied",
+                    "message": f"未批准 {name}:该账号{accounts.REASONS[reason]},已自动拒绝。需要开通请联系管理员"}
     group = _group_for(app)
     if action == "sso_approve":
         # 不论带不带角色都先读角色清单:带了要核对,没带要确认该应用确实没分角色(角色强制)。

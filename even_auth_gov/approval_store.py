@@ -126,8 +126,12 @@ def mark_escalated(open_id: str, app: str, to: str):
     重新申请(denied → pending)会建新记录,升级记录随之清零。"""
     _set(open_id, app, escalated_to=to, escalated_at=_now())
 
-def mark_denied(open_id: str, app: str, by: str):
-    _set(open_id, app, status="denied", denied_by=by, denied_at=_now())
+def mark_denied(open_id: str, app: str, by: str, reason: str = ""):
+    """reason:系统自动拒绝时的原因(如闸门拦下的 ineligible:<原因>),人工拒绝不写。"""
+    fields = {"status": "denied", "denied_by": by, "denied_at": _now()}
+    if reason:
+        fields["denied_reason"] = reason
+    _set(open_id, app, **fields)
 
 def records_for_open_id(open_id: str) -> list[dict]:
     """该用户名下所有 app 的记录(离职时用来逐个移组)。"""

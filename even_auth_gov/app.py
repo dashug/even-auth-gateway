@@ -20,7 +20,7 @@ import os
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from even_auth_gov import (webhook as wh, settings, feishu_ws, scheduler, approval_store, logging_setup,
-                           casdoor_admin as ca, id_token)
+                           casdoor_admin as ca, id_token, accounts)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,11 @@ def build_app() -> FastAPI:
         if account.get("isForbidden"):
             logger.warning("request-access 拒绝(403): %s 账号已停用 app=%s", open_id, app_name)
             return JSONResponse({"error": "账号已停用"}, status_code=403)
+        if not open_id.startswith("ou_"):
+            reason = accounts.eligibility(account, accounts.today())   # 里程碑 4a 闸门
+            if reason:
+                logger.warning("request-access 拒绝(403): %s 不是合格的受管账号(%s) app=%s", open_id, reason, app_name)
+                return JSONResponse({"error": "账号未登记、未确认或已过期,请联系管理员"}, status_code=403)
         if ca.approved_group(app_name) in (account.get("groups") or []):
             return {"status": "approved", "app": app_name}   # 已有准入(如迁移进来的老用户),不必再批
         is_new = approval_store.mark_pending(open_id, app_name, {"name": who["name"], "email": who["email"]})

@@ -139,3 +139,14 @@ def test_first_notified_at_is_kept_across_reminders(monkeypatch, tmp_path):
     s.mark_notified("ou_x", "app-a")
     rec = s.get("ou_x", "app-a")
     assert rec["first_notified_at"] == first and rec["notified_at"] != "2000-01-01T00:00:00+00:00"
+
+
+def test_mark_denied_records_reason_only_when_given(monkeypatch, tmp_path):
+    s = _store(monkeypatch, tmp_path)
+    s.mark_pending("x_1", "app-a", {"name": "张三"})
+    s.mark_denied("x_1", "app-a", "system", reason="ineligible:unregistered")
+    rec = s.get("x_1", "app-a")
+    assert rec["status"] == "denied" and rec["denied_by"] == "system" and rec["denied_reason"] == "ineligible:unregistered"
+    s.mark_pending("ou_b", "app-a", {"name": "b"})
+    s.mark_denied("ou_b", "app-a", "ou_boss")
+    assert "denied_reason" not in s.get("ou_b", "app-a")

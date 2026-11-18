@@ -20,7 +20,7 @@ COLUMNS = [
     "open_id", "app", "status", "name", "email",
     "applied_at", "first_notified_at", "notified_at", "escalated_to", "escalated_at",
     "approved_by", "approved_at", "role",
-    "denied_by", "denied_at",
+    "denied_by", "denied_at", "denied_reason",
     "disabled_reason", "disabled_at",
     "disable_failed_reason", "disable_failed_at",
 ]

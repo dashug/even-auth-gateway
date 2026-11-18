@@ -252,3 +252,62 @@ def test_escalation_target_of_another_record_cannot_decide(monkeypatch, tmp_path
     r = asyncio.run(decision.handle("sso_approve", operator_id="ou_esc", owner="ou_boss", sso_open_id="ou_a", app="app-a", client=None))
     assert r["status"] == "error" and calls == []
     assert approval_store.get("ou_a", "app-a")["status"] == "pending"
+
+
+# ── 里程碑 4a:非飞书账号闸门 ──
+
+from datetime import timedelta
+from even_auth_gov import accounts
+
+
+def _external(props=None, forbidden=False):
+    return {"id": "x_ext", "owner": "even-test", "name": "x_ext", "isForbidden": forbidden, "properties": props or {}}
+
+
+def _good_props(**over):
+    p = {"evauth_kind": "partner", "evauth_sponsor": "ou_boss",
+         "evauth_expires": (accounts.today() + timedelta(days=30)).isoformat(),
+         "evauth_confirmed_at": "2026-11-01T00:00:00+00:00"}
+    p.update(over)
+    return p
+
+
+def _setup_external(monkeypatch, tmp_path, user):
+    calls = _setup(monkeypatch, tmp_path)
+    approval_store.mark_pending("x_ext", "app-a", {"name": "张三"})
+    async def fake_get_user(client, open_id): return user
+    monkeypatch.setattr(decision.ca, "get_user", fake_get_user)
+    return calls
+
+
+def _approve_ext():
+    return asyncio.run(decision.handle("sso_approve", operator_id="ou_boss", owner="ou_boss",
+                                       sso_open_id="x_ext", app="app-a", client=None))
+
+
+@pytest.mark.parametrize("user,reason", [
+    (_external({}), "unregistered"),
+    (_external(_good_props(evauth_expires="2020-01-01")), "expired"),
+    (_external(_good_props(evauth_confirmed_at=None)), "unconfirmed"),
+    (_external(_good_props(), forbidden=True), "disabled"),
+])
+def test_approving_ineligible_external_account_is_auto_denied(monkeypatch, tmp_path, user, reason):
+    props = {k: v for k, v in user["properties"].items() if v is not None}
+    calls = _setup_external(monkeypatch, tmp_path, {**user, "properties": props})
+    r = _approve_ext()
+    assert r["status"] == "ok" and r["decision"] == "denied" and "已自动拒绝" in r["message"]
+    rec = approval_store.get("x_ext", "app-a")
+    assert (rec["status"], rec["denied_by"], rec["denied_reason"]) == ("denied", "system", f"ineligible:{reason}")
+    assert not any(c[0] == "add" for c in calls)
+
+
+def test_approving_external_when_casdoor_unreadable_stays_pending(monkeypatch, tmp_path):
+    _setup_external(monkeypatch, tmp_path, None)
+    r = _approve_ext()
+    assert r["status"] == "error" and approval_store.get("x_ext", "app-a")["status"] == "pending"
+
+
+def test_approving_eligible_external_account_proceeds(monkeypatch, tmp_path):
+    calls = _setup_external(monkeypatch, tmp_path, _external(_good_props()))
+    assert _approve_ext()["decision"] == "approved"
+    assert ("add", "x_ext", "approved-app-a") in calls
