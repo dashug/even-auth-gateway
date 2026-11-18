@@ -340,3 +340,17 @@ def test_request_access_accepts_eligible_managed_account(monkeypatch, tmp_path):
     with TestClient(app) as c:
         r = _ra(c, token(sub="x_ext"))
     assert r.status_code == 200 and r.json() == {"status": "ok", "app": "app-b"}
+
+
+def test_card_for_managed_account_shows_kind_sponsor_and_expiry(monkeypatch, tmp_path):
+    props = _managed_props()
+    app = _app_live(monkeypatch, tmp_path, users={"x_ext": {"properties": props}, "ou_boss": {"displayName": "李四"}})
+    monkeypatch.setenv("APPROVER_APP_B", "ou_app_b_boss")
+    cards = []
+    async def fake_send_card(to, card, receive_id_type="open_id"):
+        cards.append(card); return True
+    monkeypatch.setattr("even_auth_gov.feishu.send_card", fake_send_card)
+    with TestClient(app) as c:
+        assert _ra(c, token(sub="x_ext")).status_code == 200
+    expected = f"外部合作方 · 负责人 李四 · 有效期至 {props['evauth_expires']}"
+    assert expected in cards[0]["elements"][0]["content"]

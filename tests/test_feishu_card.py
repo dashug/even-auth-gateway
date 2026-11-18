@@ -46,3 +46,19 @@ def test_card_note_is_shown_above_applicant_info():
     assert "申请人" in text
     plain = build_sso_approval_card("ou_a", "申请人", "a@e.com", "app-a")
     assert "⏰" not in plain["elements"][0]["content"]
+
+
+# ── 里程碑 4a ──
+
+import pytest
+from even_auth_gov import feishu
+
+def test_card_shows_identity_line_for_managed_accounts():
+    card = feishu.build_sso_approval_card("x_1", "张三", "z@p.com", "app-a",
+                                          identity="外部合作方 · 负责人 李四 · 有效期至 2027-02-01")
+    assert "**账号类型:** 外部合作方 · 负责人 李四 · 有效期至 2027-02-01" in card["elements"][0]["content"]
+
+
+def test_card_has_no_identity_line_by_default():
+    card = feishu.build_sso_approval_card("ou_1", "张三", "z@p.com", "app-a")
+    assert "账号类型" not in card["elements"][0]["content"]

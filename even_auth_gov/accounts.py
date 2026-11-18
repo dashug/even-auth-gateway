@@ -164,3 +164,15 @@ async def gate(client, user_id: str) -> str:
     if user.get("isForbidden"):
         return "disabled"
     return eligibility(user, today())
+
+
+async def identity_of(client, user_id: str) -> str:
+    """审批卡片身份行(带负责人姓名);飞书账号返回 '' 且不查 Casdoor。查不到登记信息时给出提示而不是空白。"""
+    if str(user_id or "").startswith("ou_"):
+        return ""
+    from even_auth_gov import casdoor_admin as ca
+    user = await ca.get_user(client, user_id)
+    if not is_managed(user):
+        return "非飞书账号(未查到登记信息)"
+    sponsor = await ca.get_user(client, props(user).get(P_SPONSOR, ""))
+    return describe(user, display_name(sponsor) if sponsor else "")

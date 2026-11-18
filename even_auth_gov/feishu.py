@@ -84,7 +84,7 @@ async def send_card(receive_id: str, card: dict, receive_id_type: str = "open_id
 
 
 def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str = "",
-                            roles: list[dict] | None = None, note: str = "") -> dict:
+                            roles: list[dict] | None = None, note: str = "", identity: str = "") -> dict:
     """Build the admin-approval card for a Feishu SSO login application.
 
     `app` identifies which downstream application this applicant is requesting
@@ -99,9 +99,12 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
     没有则保持单个"批准"按钮。
 
     `note`:卡片顶部的一行说明(如超时升级"已等待 N 小时未处理"),没有则不显示。
+
+    `identity`(里程碑 4a):非飞书受管账号的身份行(类型 · 负责人 · 有效期),飞书账号为空、不显示。
     """
     note_line = f"⏰ {note}\n\n" if note else ""
     email_line = f"\n**企业邮箱:** {email}" if email else ""
+    identity_line = f"\n**账号类型:** {identity}" if identity else ""
     app_line = f"\n**申请接入应用:** {app}" if app else ""
     title = f"🔐 {app} 接入申请" if app else "🔐 应用接入申请"
     base = {"sso_open_id": open_id, "app": app}
@@ -140,7 +143,7 @@ def build_sso_approval_card(open_id: str, name: str, email: str = "", app: str =
             "template": "orange",
         },
         "elements": [
-            {"tag": "markdown", "content": f"{note_line}**申请人:** {name}{email_line}{app_line}\n\n{hint}"},
+            {"tag": "markdown", "content": f"{note_line}**申请人:** {name}{email_line}{identity_line}{app_line}\n\n{hint}"},
             {"tag": "hr"},
             action,
         ],

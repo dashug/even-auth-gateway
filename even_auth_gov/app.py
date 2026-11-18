@@ -66,11 +66,12 @@ def build_app() -> FastAPI:
         # 该应用其实分了角色就拒绝并重发带角色按钮的卡片(角色强制)。
         async with ca.make_client() as client:
             roles = await ca.list_app_roles(client, app_name, settings.known_apps())
+            identity = await accounts.identity_of(client, info.get("open_id", ""))   # 里程碑 4a:类型/负责人/有效期
         if roles is None:
             logger.warning("读取 %s 的角色清单失败,审批卡片不带角色按钮", app_name)
         ok = await send_card(owner, build_sso_approval_card(
             info.get("open_id", ""), info.get("name", ""), info.get("email", ""), app_name, roles=roles or [],
-            note=info.get("note", ""),
+            note=info.get("note", ""), identity=identity,
         ))
         if not ok:
             raise RuntimeError(f"飞书 send_card 失败(审批人 {owner}, app={app_name})")
